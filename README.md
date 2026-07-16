@@ -128,6 +128,23 @@ Runs the real ingestion pipeline offline, so the doc is already `ready` when the
 > place, [`backend/app/config.py`](backend/app/config.py), so swapping is a one-line change.
 > Currently: `gemini-embedding-001` (768-dim) + `gemini-flash-lite-latest`.
 
+## Deploying the backend (Render)
+
+[`render.yaml`](render.yaml) at the repo root is a Render [Blueprint](https://render.com/docs/blueprint-spec) —
+it builds `backend/` as a standalone Python web service.
+
+1. Push this repo to GitHub (already done if you're reading this from there).
+2. In the Render dashboard: **New → Blueprint**, connect the repo. Render reads `render.yaml`
+   and provisions the `lumen-backend` web service automatically.
+3. Set the secrets it can't infer from the file (`sync: false` means "you set this manually"):
+   `SUPABASE_URL`, `SUPABASE_KEY`, `GEMINI_API_KEY`, and `CORS_ORIGINS` (your deployed frontend's
+   origin, e.g. `https://your-app.vercel.app` — comma-separate multiple origins).
+4. Once live, run `backend/db/schema.sql` against that same Supabase project if you haven't
+   already, and point your frontend's `NEXT_PUBLIC_API_URL` at the Render service URL.
+
+The free plan spins down on idle — the first request after inactivity takes ~30-60s to wake up.
+Fine for a demo, not for anything latency-sensitive.
+
 ## API
 
 | Method | Path | Purpose |
