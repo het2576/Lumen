@@ -1,0 +1,1 @@
+export default function SimilarityBadge({ score }: { score: number }) { const percent = Math.round(score * 100); return <span className={`similarity ${percent >= 80 ? "high" : percent >= 60 ? "mid" : ""}`}>{percent}% match</span>; }
