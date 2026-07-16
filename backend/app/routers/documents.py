@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, UploadFile
+from postgrest.exceptions import APIError
 
 from app import db
 from app.models.schemas import DocumentOut, UploadResponse
@@ -65,7 +66,13 @@ def delete_document(document_id: str):
     doc = db.get_document(document_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found.")
-    db.delete_document(document_id)
+    try:
+        db.delete_document(document_id)
+    except APIError as e:
+        raise HTTPException(
+            status_code=409,
+            detail="This document couldn't be deleted because of a database constraint. Run the cascade fix in backend/db/schema.sql against your Supabase project and try again.",
+        ) from e
 
 
 @router.get("", response_model=list[DocumentOut])

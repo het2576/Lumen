@@ -61,6 +61,18 @@ create table if not exists query_log (
 create index if not exists query_log_created_at_idx
   on query_log (created_at desc);
 
+-- Self-healing cascade fix: CREATE TABLE IF NOT EXISTS above only applies "on delete cascade"
+-- to brand-new databases. Re-running this block against an already-created database (e.g. one
+-- set up before this fix existed) drops and re-adds these two FKs with cascade, so deleting a
+-- document doesn't fail with a foreign key violation just because it has conversations/queries.
+alter table conversations drop constraint if exists conversations_document_id_fkey;
+alter table conversations add constraint conversations_document_id_fkey
+  foreign key (document_id) references documents(id) on delete cascade;
+
+alter table query_log drop constraint if exists query_log_document_id_fkey;
+alter table query_log add constraint query_log_document_id_fkey
+  foreign key (document_id) references documents(id) on delete cascade;
+
 -- Semantic search via RPC (cosine similarity, filtered to one document).
 create or replace function match_document_chunks(
   p_document_id uuid,
