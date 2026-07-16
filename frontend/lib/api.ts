@@ -65,6 +65,20 @@ export async function getConversationMessages(conversationId: string): Promise<C
   return handle(res);
 }
 
+export async function deleteDocument(documentId: string): Promise<void> {
+  const res = await fetch(`${API_URL}/documents/${documentId}`, { method: "DELETE" });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const body = await res.json();
+      detail = body.detail ?? detail;
+    } catch {
+      // ignore non-JSON error bodies
+    }
+    throw new ApiError(detail, res.status);
+  }
+}
+
 export async function getStats(): Promise<Stats> {
   const res = await fetch(`${API_URL}/stats`);
   return handle(res);

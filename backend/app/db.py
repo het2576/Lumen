@@ -51,6 +51,10 @@ def list_documents() -> list[dict]:
     return res.data
 
 
+def delete_document(document_id: str) -> None:
+    get_client().table("documents").delete().eq("id", document_id).execute()
+
+
 def insert_chunks(document_id: str, chunks: list[dict]) -> None:
     rows = [
         {

@@ -38,10 +38,16 @@ export default function Home() {
     setSidebarOpen(false);
   }
 
+  function handleDeleted(documentId: string) {
+    setDocuments((previous) => previous.filter((item) => item.id !== documentId));
+    setSelected((previous) => (previous?.id === documentId ? null : previous));
+    window.localStorage.removeItem(`lumen:conversation:${documentId}`);
+  }
+
   return (
     <main className="app-shell">
       <div className={`sidebar-scrim ${sidebarOpen ? "is-visible" : ""}`} onClick={() => setSidebarOpen(false)} />
-      <Sidebar documents={documents} selectedId={selected?.id ?? null} onSelect={handleSelect} onUploaded={handleUploaded} loading={loading} open={sidebarOpen} />
+      <Sidebar documents={documents} selectedId={selected?.id ?? null} onSelect={handleSelect} onUploaded={handleUploaded} onDeleted={handleDeleted} loading={loading} open={sidebarOpen} />
       <section className="workspace">
         <StatsBar document={selected} onMenu={() => setSidebarOpen(true)} onNewChat={() => setChatSession((session) => session + 1)} />
         <ChatPanel document={selected} resetSignal={chatSession} onOpenLibrary={() => setSidebarOpen(true)} />

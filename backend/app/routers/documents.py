@@ -60,6 +60,14 @@ def get_status(document_id: str):
     )
 
 
+@router.delete("/{document_id}", status_code=204)
+def delete_document(document_id: str):
+    doc = db.get_document(document_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    db.delete_document(document_id)
+
+
 @router.get("", response_model=list[DocumentOut])
 def list_all_documents():
     docs = db.list_documents()
