@@ -2,12 +2,15 @@
 
 import { useEffect, useState } from "react";
 import ChatPanel from "@/components/ChatPanel";
+import LoginScreen from "@/components/LoginScreen";
 import Sidebar from "@/components/Sidebar";
 import StatsBar from "@/components/StatsBar";
+import { useAuth } from "@/lib/AuthProvider";
 import { listDocuments } from "@/lib/api";
 import type { Document } from "@/lib/types";
 
 export default function Home() {
+  const { user, loading: authLoading, signOut } = useAuth();
   const [documents, setDocuments] = useState<Document[]>([]);
   const [selected, setSelected] = useState<Document | null>(null);
   const [loading, setLoading] = useState(true);
@@ -15,6 +18,8 @@ export default function Home() {
   const [chatSession, setChatSession] = useState(0);
 
   useEffect(() => {
+    if (!user) return;
+    setLoading(true);
     listDocuments()
       .then((docs) => {
         setDocuments(docs);
@@ -22,7 +27,7 @@ export default function Home() {
       })
       .catch(() => undefined)
       .finally(() => setLoading(false));
-  }, []);
+  }, [user]);
 
   function handleUploaded(document: Document) {
     setDocuments((previous) => {
@@ -44,10 +49,28 @@ export default function Home() {
     window.localStorage.removeItem(`lumen:conversation:${documentId}`);
   }
 
+  if (authLoading) {
+    return <div className="auth-loading">Loading…</div>;
+  }
+
+  if (!user) {
+    return <LoginScreen />;
+  }
+
   return (
     <main className="app-shell">
       <div className={`sidebar-scrim ${sidebarOpen ? "is-visible" : ""}`} onClick={() => setSidebarOpen(false)} />
-      <Sidebar documents={documents} selectedId={selected?.id ?? null} onSelect={handleSelect} onUploaded={handleUploaded} onDeleted={handleDeleted} loading={loading} open={sidebarOpen} />
+      <Sidebar
+        documents={documents}
+        selectedId={selected?.id ?? null}
+        onSelect={handleSelect}
+        onUploaded={handleUploaded}
+        onDeleted={handleDeleted}
+        loading={loading}
+        open={sidebarOpen}
+        userEmail={user.email ?? null}
+        onSignOut={signOut}
+      />
       <section className="workspace">
         <StatsBar document={selected} onMenu={() => setSidebarOpen(true)} onNewChat={() => setChatSession((session) => session + 1)} />
         <ChatPanel document={selected} resetSignal={chatSession} onOpenLibrary={() => setSidebarOpen(true)} />

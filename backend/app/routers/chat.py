@@ -1,6 +1,7 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from app import db
+from app.auth import get_current_user_id
 from app.models.schemas import ChatRequest, ChatResponseOut, ConversationHistoryOut, ConversationMessageOut, SourceOut
 from app.services.generation import generate_answer
 from app.services.retrieval import hybrid_search
@@ -9,9 +10,14 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 
 @router.get("/{conversation_id}/messages", response_model=ConversationHistoryOut)
-def get_messages(conversation_id: str):
+def get_messages(conversation_id: str, user_id: str = Depends(get_current_user_id)):
     conversation = db.get_conversation(conversation_id)
     if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+
+    # Ownership check: the conversation's document must belong to the requesting user.
+    document = db.get_document(conversation["document_id"], user_id)
+    if not document:
         raise HTTPException(status_code=404, detail="Conversation not found.")
 
     return ConversationHistoryOut(
@@ -22,8 +28,8 @@ def get_messages(conversation_id: str):
 
 
 @router.post("", response_model=ChatResponseOut)
-def chat(req: ChatRequest):
-    document = db.get_document(req.document_id)
+def chat(req: ChatRequest, user_id: str = Depends(get_current_user_id)):
+    document = db.get_document(req.document_id, user_id)
     if not document:
         raise HTTPException(status_code=404, detail="Document not found.")
     if document["status"] != "ready":
@@ -31,7 +37,7 @@ def chat(req: ChatRequest):
 
     if req.conversation_id:
         conversation = db.get_conversation(req.conversation_id)
-        if not conversation:
+        if not conversation or conversation["document_id"] != req.document_id:
             raise HTTPException(status_code=404, detail="Conversation not found.")
         conversation_id = req.conversation_id
     else:

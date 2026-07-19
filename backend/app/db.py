@@ -18,8 +18,13 @@ def get_client() -> Client:
     return _client
 
 
-def create_document(filename: str) -> str:
-    res = get_client().table("documents").insert({"filename": filename, "status": "processing"}).execute()
+def create_document(filename: str, user_id: str) -> str:
+    res = (
+        get_client()
+        .table("documents")
+        .insert({"filename": filename, "status": "processing", "user_id": user_id})
+        .execute()
+    )
     return res.data[0]["id"]
 
 
@@ -41,18 +46,33 @@ def update_document_status(
     get_client().table("documents").update(payload).eq("id", document_id).execute()
 
 
-def get_document(document_id: str) -> Optional[dict]:
-    res = get_client().table("documents").select("*").eq("id", document_id).limit(1).execute()
+def get_document(document_id: str, user_id: str) -> Optional[dict]:
+    res = (
+        get_client()
+        .table("documents")
+        .select("*")
+        .eq("id", document_id)
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
     return res.data[0] if res.data else None
 
 
-def list_documents() -> list[dict]:
-    res = get_client().table("documents").select("*").order("uploaded_at", desc=True).execute()
+def list_documents(user_id: str) -> list[dict]:
+    res = (
+        get_client()
+        .table("documents")
+        .select("*")
+        .eq("user_id", user_id)
+        .order("uploaded_at", desc=True)
+        .execute()
+    )
     return res.data
 
 
-def delete_document(document_id: str) -> None:
-    get_client().table("documents").delete().eq("id", document_id).execute()
+def delete_document(document_id: str, user_id: str) -> None:
+    get_client().table("documents").delete().eq("id", document_id).eq("user_id", user_id).execute()
 
 
 def insert_chunks(document_id: str, chunks: list[dict]) -> None:
@@ -146,14 +166,20 @@ def log_query(document_id: str, question: str, avg_similarity: Optional[float]) 
     ).execute()
 
 
-def get_stats() -> dict:
+def get_stats(user_id: str) -> dict:
     client = get_client()
-    documents = client.table("documents").select("id", count="exact").execute()
-    chunks = client.table("document_chunks").select("id", count="exact").execute()
-    queries = client.table("query_log").select("id", count="exact").execute()
+    documents = client.table("documents").select("id", count="exact").eq("user_id", user_id).execute()
+    doc_ids = [d["id"] for d in documents.data]
+
+    if not doc_ids:
+        return {"total_documents": 0, "total_chunks": 0, "total_queries": 0, "avg_similarity_last_10": None}
+
+    chunks = client.table("document_chunks").select("id", count="exact").in_("document_id", doc_ids).execute()
+    queries = client.table("query_log").select("id", count="exact").in_("document_id", doc_ids).execute()
     recent = (
         client.table("query_log")
         .select("avg_similarity")
+        .in_("document_id", doc_ids)
         .order("created_at", desc=True)
         .limit(10)
         .execute()

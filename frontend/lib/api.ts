@@ -1,3 +1,4 @@
+import { supabase } from "./supabaseClient";
 import type { ChatResponse, ConversationHistory, Document, Stats } from "./types";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -7,6 +8,12 @@ class ApiError extends Error {
     super(message);
     this.name = "ApiError";
   }
+}
+
+async function authHeaders(): Promise<Record<string, string>> {
+  const { data } = await supabase.auth.getSession();
+  const token = data.session?.access_token;
+  return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
 async function handle<T>(res: Response): Promise<T> {
@@ -28,18 +35,19 @@ export async function uploadDocument(file: File): Promise<{ document_id: string;
   formData.append("file", file);
   const res = await fetch(`${API_URL}/documents/upload`, {
     method: "POST",
+    headers: await authHeaders(),
     body: formData,
   });
   return handle(res);
 }
 
 export async function getDocumentStatus(documentId: string): Promise<Document> {
-  const res = await fetch(`${API_URL}/documents/${documentId}/status`);
+  const res = await fetch(`${API_URL}/documents/${documentId}/status`, { headers: await authHeaders() });
   return handle(res);
 }
 
 export async function listDocuments(): Promise<Document[]> {
-  const res = await fetch(`${API_URL}/documents`);
+  const res = await fetch(`${API_URL}/documents`, { headers: await authHeaders() });
   return handle(res);
 }
 
@@ -50,7 +58,7 @@ export async function sendChatMessage(params: {
 }): Promise<ChatResponse> {
   const res = await fetch(`${API_URL}/chat`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
     body: JSON.stringify({
       document_id: params.documentId,
       conversation_id: params.conversationId,
@@ -61,12 +69,15 @@ export async function sendChatMessage(params: {
 }
 
 export async function getConversationMessages(conversationId: string): Promise<ConversationHistory> {
-  const res = await fetch(`${API_URL}/chat/${conversationId}/messages`);
+  const res = await fetch(`${API_URL}/chat/${conversationId}/messages`, { headers: await authHeaders() });
   return handle(res);
 }
 
 export async function deleteDocument(documentId: string): Promise<void> {
-  const res = await fetch(`${API_URL}/documents/${documentId}`, { method: "DELETE" });
+  const res = await fetch(`${API_URL}/documents/${documentId}`, {
+    method: "DELETE",
+    headers: await authHeaders(),
+  });
   if (!res.ok) {
     let detail = res.statusText;
     try {
@@ -80,7 +91,7 @@ export async function deleteDocument(documentId: string): Promise<void> {
 }
 
 export async function getStats(): Promise<Stats> {
-  const res = await fetch(`${API_URL}/stats`);
+  const res = await fetch(`${API_URL}/stats`, { headers: await authHeaders() });
   return handle(res);
 }
 

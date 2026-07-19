@@ -1,10 +1,11 @@
 import os
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile
 from postgrest.exceptions import APIError
 
 from app import db
+from app.auth import get_current_user_id
 from app.models.schemas import DocumentOut, UploadResponse
 from app.services.ingestion import ingest_document
 
@@ -17,7 +18,11 @@ MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB
 
 
 @router.post("/upload", response_model=UploadResponse)
-async def upload_document(background_tasks: BackgroundTasks, file: UploadFile):
+async def upload_document(
+    background_tasks: BackgroundTasks,
+    file: UploadFile,
+    user_id: str = Depends(get_current_user_id),
+):
     if file.content_type != "application/pdf":
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
@@ -27,7 +32,7 @@ async def upload_document(background_tasks: BackgroundTasks, file: UploadFile):
     if not contents:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
-    document_id = db.create_document(file.filename)
+    document_id = db.create_document(file.filename, user_id)
 
     dest_path = UPLOAD_DIR / f"{document_id}.pdf"
     with open(dest_path, "wb") as f:
@@ -46,8 +51,8 @@ async def upload_document(background_tasks: BackgroundTasks, file: UploadFile):
 
 
 @router.get("/{document_id}/status", response_model=DocumentOut)
-def get_status(document_id: str):
-    doc = db.get_document(document_id)
+def get_status(document_id: str, user_id: str = Depends(get_current_user_id)):
+    doc = db.get_document(document_id, user_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found.")
     return DocumentOut(
@@ -62,12 +67,12 @@ def get_status(document_id: str):
 
 
 @router.delete("/{document_id}", status_code=204)
-def delete_document(document_id: str):
-    doc = db.get_document(document_id)
+def delete_document(document_id: str, user_id: str = Depends(get_current_user_id)):
+    doc = db.get_document(document_id, user_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found.")
     try:
-        db.delete_document(document_id)
+        db.delete_document(document_id, user_id)
     except APIError as e:
         raise HTTPException(
             status_code=409,
@@ -76,8 +81,8 @@ def delete_document(document_id: str):
 
 
 @router.get("", response_model=list[DocumentOut])
-def list_all_documents():
-    docs = db.list_documents()
+def list_all_documents(user_id: str = Depends(get_current_user_id)):
+    docs = db.list_documents(user_id)
     return [
         DocumentOut(
             id=d["id"],
