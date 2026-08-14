@@ -21,4 +21,8 @@ app.include_router(stats.router)
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    try:
+        result = supabase.table("query_log").select("id").limit(1).execute()
+        return {"status": "ok", "db": "reachable"}
+    except Exception as e:
+        return {"status": "error", "db": str(e)}
