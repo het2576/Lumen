@@ -218,3 +218,65 @@ button { -webkit-tap-highlight-color: transparent; }
 }
 
 @media (max-width: 380px) { .auth-story { min-height: 330px; }.auth-story-copy { padding-top: 38px; }.auth-entry-inner { padding-right: 19px; padding-left: 19px; }.auth-footer { padding-right: 19px; padding-left: 19px; }.auth-footer-lock { display: none; } }
+
+/* ─── Smart Table ─────────────────────────────────────────────────────────── */
+.smart-table-wrap { margin: 14px 0 18px; }
+.smart-table-scroll { overflow-x: auto; border-radius: 10px; border: 1px solid var(--line); }
+.smart-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.smart-table th { padding: 10px 13px; background: var(--panel-raised); color: var(--muted); font-family: var(--font-geist-mono), monospace; font-size: 10px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.smart-table td { padding: 9px 13px; border-bottom: 1px solid rgba(214,227,235,.06); color: #d0dbe0; line-height: 1.45; }
+.smart-table tr:last-child td { border-bottom: 0; }
+.smart-table tr:hover td { background: rgba(255,255,255,.025); }
+
+/* ─── Chart toggle ────────────────────────────────────────────────────────── */
+.smart-chart-area { margin-top: 4px; }
+.smart-chart-toggle { border: 0; padding: 4px 0; color: var(--quiet); background: transparent; font-family: var(--font-geist-mono), monospace; font-size: 10px; cursor: pointer; transition: color .15s ease; }
+.smart-chart-toggle:hover { color: var(--signal); }
+
+/* ─── Citation superscript ────────────────────────────────────────────────── */
+.citation-ref { display: inline-grid; min-width: 16px; height: 16px; place-items: center; margin: 0 2px; border-radius: 4px; background: var(--panel-raised); color: var(--signal); font-family: var(--font-geist-mono), monospace; font-size: 9px; font-weight: 600; vertical-align: super; line-height: 1; }
+
+/* ─── Code block ──────────────────────────────────────────────────────────── */
+.answer-code { margin: 12px 0; border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; background: #0b0f17; overflow-x: auto; font-family: var(--font-geist-mono), monospace; font-size: 12px; line-height: 1.6; color: #c9d8df; white-space: pre; }
+
+/* ─── LumenChart card ─────────────────────────────────────────────────────── */
+.lumen-chart-card { position: relative; margin: 14px 0 18px; border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px 14px; background: var(--panel); }
+.lumen-chart-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+.lumen-chart-title { margin: 0 0 3px; color: var(--paper); font-size: 13px; font-weight: 580; }
+.lumen-chart-subtitle { margin: 0; color: var(--quiet); font-family: var(--font-geist-mono), monospace; font-size: 10px; }
+.lumen-chart-tabs { display: flex; gap: 4px; flex-shrink: 0; }
+.lumen-chart-tab { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--line); border-radius: 7px; padding: 5px 9px; color: var(--muted); background: transparent; font-family: var(--font-geist-mono), monospace; font-size: 10px; font-weight: 600; cursor: pointer; transition: border-color .15s ease, color .15s ease, background .15s ease; }
+.lumen-chart-tab:hover { border-color: var(--line-strong); color: var(--paper); }
+.lumen-chart-tab.active { border-color: rgba(129,228,202,.45); color: var(--signal); background: var(--signal-soft); }
+
+/* Bar chart */
+.lumen-chart-bars { display: grid; gap: 10px; }
+.lumen-bar-row { display: flex; align-items: center; gap: 10px; border-radius: 7px; padding: 4px 5px; cursor: default; transition: background .15s ease; }
+.lumen-bar-row.is-hovered { background: rgba(255,255,255,.032); }
+.lumen-bar-label { flex: 0 0 120px; overflow: hidden; color: var(--muted); font-size: 11px; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+.lumen-bar-track { flex: 1; height: 7px; border-radius: 99px; background: rgba(255,255,255,.07); overflow: hidden; }
+.lumen-bar-fill { height: 100%; border-radius: 99px; transition: width .5s cubic-bezier(.16,1,.3,1); }
+.lumen-bar-val { flex: 0 0 auto; color: var(--muted); font-family: var(--font-geist-mono), monospace; font-size: 10px; }
+
+/* Line chart */
+.lumen-chart-svg-wrap { display: flex; flex-direction: column; gap: 12px; }
+.lumen-line-svg { display: block; width: 100%; height: 180px; }
+.lumen-line-labels { display: flex; justify-content: space-around; gap: 4px; overflow-x: auto; }
+.lumen-line-label-col { display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 60px; }
+.lumen-line-label-name { overflow: hidden; max-width: 80px; color: var(--quiet); font-size: 10px; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
+.lumen-line-label-val { color: var(--paper); font-family: var(--font-geist-mono), monospace; font-size: 10px; font-weight: 600; }
+
+/* Donut chart */
+.lumen-donut-layout { display: flex; align-items: center; gap: 22px; flex-wrap: wrap; }
+.lumen-donut-graphic { flex: 0 0 auto; }
+.lumen-donut-legend { display: grid; flex: 1; min-width: 160px; gap: 7px; }
+.lumen-legend-item { display: flex; align-items: center; gap: 8px; border-radius: 7px; padding: 5px 7px; cursor: default; transition: background .15s ease; }
+.lumen-legend-item.is-hovered { background: rgba(255,255,255,.04); }
+.lumen-legend-dot { flex: 0 0 8px; width: 8px; height: 8px; border-radius: 50%; }
+.lumen-legend-name { flex: 1; overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.lumen-legend-pct { color: var(--quiet); font-family: var(--font-geist-mono), monospace; font-size: 10px; }
+.lumen-legend-val { min-width: 55px; color: var(--paper); font-family: var(--font-geist-mono), monospace; font-size: 10px; font-weight: 600; text-align: right; }
+
+/* Tooltip */
+.lumen-chart-tooltip { display: inline-flex; align-items: center; gap: 7px; margin-top: 10px; border: 1px solid var(--line); border-radius: 8px; padding: 6px 11px; background: var(--panel-raised); color: var(--paper); font-family: var(--font-geist-mono), monospace; font-size: 11px; animation: enter .12s ease both; }
+.tooltip-dot { flex: 0 0 7px; width: 7px; height: 7px; border-radius: 50%; }
