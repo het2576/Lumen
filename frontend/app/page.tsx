@@ -15,6 +15,7 @@ export default function Home() {
   const [selected, setSelected] = useState<Document | null>(null);
   const [loading, setLoading] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [chatSession, setChatSession] = useState(0);
 
   useEffect(() => {
@@ -68,6 +69,8 @@ export default function Home() {
         onDeleted={handleDeleted}
         loading={loading}
         open={sidebarOpen}
+        collapsed={sidebarCollapsed}
+        onToggleCollapse={() => setSidebarCollapsed((v) => !v)}
         userEmail={user.email ?? null}
         onSignOut={signOut}
       />

@@ -101,6 +101,22 @@ button { -webkit-tap-highlight-color: transparent; }
 .privacy-note { display: flex; align-items: center; gap: 7px; color: var(--quiet); font-size: 10px; }
 .privacy-note svg { color: var(--signal); }
 
+/* Sidebar collapse */
+.sidebar.is-collapsed { width: 54px; flex: 0 0 54px; }
+.sidebar-collapse-btn { margin-left: auto; display: grid; width: 26px; height: 26px; place-items: center; border: 1px solid var(--line); border-radius: 7px; color: var(--quiet); background: transparent; cursor: pointer; transition: color .15s ease, border-color .15s ease, background .15s ease; flex-shrink: 0; }
+.sidebar-collapse-btn:hover { color: var(--signal); border-color: rgba(129,228,202,.4); background: var(--signal-soft); }
+
+/* Multi-select */
+.multi-select-btn { border: 1px solid var(--line); border-radius: 6px; padding: 3px 7px; color: var(--quiet); background: transparent; font-family: var(--font-geist-mono), monospace; font-size: 9px; font-weight: 600; cursor: pointer; transition: color .15s ease, border-color .15s ease, background .15s ease; }
+.multi-select-btn:hover, .multi-select-btn.active { border-color: rgba(129,228,202,.4); color: var(--signal); background: var(--signal-soft); }
+.multi-select-banner { display: flex; align-items: center; justify-content: space-between; margin: 4px 8px 8px; border-radius: 7px; padding: 6px 9px; background: var(--signal-soft); border: 1px solid rgba(129,228,202,.2); }
+.multi-select-banner span { color: var(--signal); font-family: var(--font-geist-mono), monospace; font-size: 10px; font-weight: 600; }
+.multi-select-clear { border: 0; padding: 0; color: var(--quiet); background: transparent; font-family: var(--font-geist-mono), monospace; font-size: 10px; cursor: pointer; transition: color .15s ease; }
+.multi-select-clear:hover { color: var(--signal); }
+.doc-checkbox { display: grid; width: 18px; height: 18px; flex: 0 0 18px; place-items: center; border: 1.5px solid var(--line-strong); border-radius: 5px; margin-left: 6px; background: transparent; cursor: pointer; transition: border-color .15s ease, background .15s ease; }
+.doc-checkbox.checked { border-color: var(--signal); background: var(--signal); color: #07251f; }
+.document-row.is-checked { background: var(--signal-soft); border-color: rgba(129,228,202,.2); }
+
 /* Header */
 .topbar { display: flex; min-height: 73px; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--line); padding: 13px 31px; }
 .context { min-width: 0; display: flex; align-items: center; gap: 11px; }
