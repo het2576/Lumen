@@ -1,13 +1,14 @@
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile
 from postgrest.exceptions import APIError
 
 from app import db
 from app.auth import get_current_user_id
-from app.models.schemas import DocumentOut, UploadResponse
-from app.services.ingestion import ingest_document
+from app.models.schemas import DocumentOut, UploadResponse, UrlIngestRequest
+from app.services.ingestion import ingest_document, ingest_webpage, ingest_youtube, validate_public_url, _parse_youtube_id
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -15,6 +16,26 @@ UPLOAD_DIR = Path(__file__).resolve().parent.parent.parent / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB
+ALLOWED_SUFFIXES = {".pdf", ".csv", ".xlsx"}
+
+
+def _webpage_label(url: str) -> str:
+    # A concise library label remains readable while the complete URL is stored.
+    parsed = urlparse(url)
+    return f"Web · {parsed.hostname or 'source'}"
+
+
+def _is_youtube_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.hostname in {"www.youtube.com", "youtube.com", "youtu.be", "m.youtube.com"}
+
+
+def _youtube_label(url: str) -> str:
+    try:
+        video_id = _parse_youtube_id(url)
+        return f"YT · {video_id}"
+    except Exception:
+        return "YT · video"
 
 
 @router.post("/upload", response_model=UploadResponse)
@@ -23,8 +44,9 @@ async def upload_document(
     file: UploadFile,
     user_id: str = Depends(get_current_user_id),
 ):
-    if file.content_type != "application/pdf":
-        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in ALLOWED_SUFFIXES:
+        raise HTTPException(status_code=400, detail="Supported files: PDF, CSV, and XLSX.")
 
     contents = await file.read()
     if len(contents) > MAX_UPLOAD_BYTES:
@@ -34,7 +56,7 @@ async def upload_document(
 
     document_id = db.create_document(file.filename, user_id)
 
-    dest_path = UPLOAD_DIR / f"{document_id}.pdf"
+    dest_path = UPLOAD_DIR / f"{document_id}{suffix}"
     with open(dest_path, "wb") as f:
         f.write(contents)
 
@@ -47,6 +69,49 @@ async def upload_document(
 
     background_tasks.add_task(_run)
 
+    return UploadResponse(document_id=document_id, status="processing")
+
+
+@router.post("/url", response_model=UploadResponse)
+def add_url_source(
+    payload: UrlIngestRequest,
+    background_tasks: BackgroundTasks,
+    user_id: str = Depends(get_current_user_id),
+):
+    url_str = payload.url.strip()
+    if _is_youtube_url(url_str):
+        try:
+            _parse_youtube_id(url_str)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        document_id = db.create_document(_youtube_label(url_str), user_id, source_url=url_str)
+        background_tasks.add_task(ingest_youtube, url_str, document_id)
+        return UploadResponse(document_id=document_id, status="processing")
+
+    try:
+        url = validate_public_url(payload.url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    document_id = db.create_document(_webpage_label(url), user_id, source_url=url)
+    background_tasks.add_task(ingest_webpage, url, document_id)
+    return UploadResponse(document_id=document_id, status="processing")
+
+
+@router.post("/youtube", response_model=UploadResponse)
+def add_youtube_source(
+    payload: UrlIngestRequest,
+    background_tasks: BackgroundTasks,
+    user_id: str = Depends(get_current_user_id),
+):
+    url = payload.url.strip()
+    if not _is_youtube_url(url):
+        raise HTTPException(status_code=400, detail="That doesn't look like a YouTube URL. Paste a youtube.com or youtu.be link.")
+    try:
+        _parse_youtube_id(url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    document_id = db.create_document(_youtube_label(url), user_id, source_url=url)
+    background_tasks.add_task(ingest_youtube, url, document_id)
     return UploadResponse(document_id=document_id, status="processing")
 
 

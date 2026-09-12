@@ -41,6 +41,24 @@ export async function uploadDocument(file: File): Promise<{ document_id: string;
   return handle(res);
 }
 
+export async function uploadUrl(url: string): Promise<{ document_id: string; status: string }> {
+  const res = await fetch(`${API_URL}/documents/url`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
+    body: JSON.stringify({ url }),
+  });
+  return handle(res);
+}
+
+export async function uploadYoutube(url: string): Promise<{ document_id: string; status: string }> {
+  const res = await fetch(`${API_URL}/documents/youtube`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
+    body: JSON.stringify({ url }),
+  });
+  return handle(res);
+}
+
 export async function getDocumentStatus(documentId: string): Promise<Document> {
   const res = await fetch(`${API_URL}/documents/${documentId}/status`, { headers: await authHeaders() });
   return handle(res);
@@ -54,6 +72,7 @@ export async function listDocuments(): Promise<Document[]> {
 export async function sendChatMessage(params: {
   question: string;
   documentId: string;
+  documentIds?: string[];
   conversationId?: string;
 }): Promise<ChatResponse> {
   const res = await fetch(`${API_URL}/chat`, {
@@ -61,6 +80,7 @@ export async function sendChatMessage(params: {
     headers: { "Content-Type": "application/json", ...(await authHeaders()) },
     body: JSON.stringify({
       document_id: params.documentId,
+      document_ids: params.documentIds,
       conversation_id: params.conversationId,
       question: params.question,
     }),

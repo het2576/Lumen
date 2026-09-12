@@ -18,15 +18,24 @@ class UploadResponse(BaseModel):
     status: str
 
 
+class UrlIngestRequest(BaseModel):
+    url: str
+
+
 class SourceOut(BaseModel):
     chunk_id: str
     text: str
     page_number: Optional[int]
     similarity_score: float
+    document_id: Optional[str] = None
+    document_name: Optional[str] = None
+    table_name: Optional[str] = None
+    verification: Optional[str] = None
 
 
 class ChatRequest(BaseModel):
     document_id: str
+    document_ids: Optional[list[str]] = None
     question: str
     conversation_id: Optional[str] = None
 
@@ -35,6 +44,8 @@ class ChatResponseOut(BaseModel):
     conversation_id: str
     answer: str
     sources: list[SourceOut]
+    verification: Optional[str] = None
+    chart: Optional[dict] = None
 
 
 class ConversationMessageOut(BaseModel):
@@ -47,6 +58,7 @@ class ConversationMessageOut(BaseModel):
 class ConversationHistoryOut(BaseModel):
     conversation_id: str
     document_id: str
+    document_ids: list[str] = []
     messages: list[ConversationMessageOut]
 
 

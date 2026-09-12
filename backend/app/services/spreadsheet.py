@@ -1,218 +1,149 @@
-"""
-Phase 1 – Spreadsheet query service.
+"""Verified structured-data queries.
 
-Responsibilities:
-  1. is_tabular_question()     — heuristic to route queries to pandas vs. vector search
-  2. execute_pandas_query()    — translate NL question → pandas operation → execute safely
-  3. format_table_response()   — convert a DataFrame to a markdown table string
+The model selects a constrained JSON query plan; pandas performs arithmetic.
+Arbitrary model-generated Python is never executed.
 """
-import io
 import json
 import logging
-import subprocess
-import sys
-import textwrap
-from typing import Optional
+import re
+from typing import Any
+
+import pandas as pd
 
 from app.config import GENERATION_MODEL
 from app.services.gemini_client import get_genai
 
 logger = logging.getLogger(__name__)
 
-# ─── Keywords that signal a tabular/numeric question ──────────────────────────
 _TABULAR_KEYWORDS = {
-    "average", "avg", "mean", "sum", "total", "count", "max", "maximum",
-    "min", "minimum", "median", "std", "variance", "percent", "percentage",
-    "rows where", "filter", "where", "greater than", "less than", "equal to",
-    "top ", "bottom ", "sort", "rank", "highest", "lowest", "column",
-    "sheet", "table", "spreadsheet", "csv", "xlsx",
+    "average", "avg", "mean", "sum", "total", "count", "max", "maximum", "min", "minimum",
+    "median", "variance", "percent", "percentage", "rows where", "filter", "greater than", "less than",
+    "highest", "lowest", "column", "sheet", "table", "spreadsheet", "csv", "xlsx", "chart", "trend",
+    "compare", "difference", "increase", "decrease",
 }
+_ACTIONS = {"aggregate", "rows", "top", "chart", "compare"}
+_AGGREGATES = {"sum", "mean", "median", "min", "max", "count"}
+_OPERATORS = {"eq", "ne", "gt", "gte", "lt", "lte", "contains"}
 
 
 def is_tabular_question(question: str) -> bool:
-    """
-    Returns True if the question looks like it targets structured/tabular data.
-    Uses a fast keyword scan first; only calls the LLM if uncertain.
-    """
-    q_lower = question.lower()
-    if any(kw in q_lower for kw in _TABULAR_KEYWORDS):
-        return True
-    return False
+    return any(term in question.lower() for term in _TABULAR_KEYWORDS)
 
 
-def _build_translate_prompt(question: str, column_headers: list[str], sheet_name: Optional[str]) -> str:
-    context = f"Sheet: {sheet_name}\n" if sheet_name else ""
-    cols = ", ".join(f'"{c}"' for c in column_headers)
-    return textwrap.dedent(f"""
-        You are a pandas code generator. Given a question about a DataFrame called `df`,
-        produce a single Python expression (or a short block ending with a print statement)
-        that answers the question. Use only the pandas library (already imported as pd).
-        Do NOT import anything else. Do NOT use eval(), exec(), open(), or any I/O.
-
-        {context}DataFrame columns: {cols}
-
-        Rules:
-        - If the answer is a scalar (number, string), assign it to a variable `result`
-          and end with: print(result)
-        - If the answer is a DataFrame or Series (table), assign it to `result`
-          and end with: print(result.to_markdown(index=False))
-        - Use .fillna('') for any operation that might break on NaN values.
-        - If the question cannot be answered with the available columns, print: CANNOT_ANSWER
-
-        Question: {question}
-
-        Respond with ONLY the Python code, no explanation, no markdown fences.
-    """).strip()
+def _metadata(tables: list[dict]) -> list[dict[str, Any]]:
+    return [{"id": table.get("id"), "name": table.get("table_name"), "document_id": table.get("document_id"), "columns": table.get("column_headers", [])} for table in tables]
 
 
-def execute_pandas_query(
-    question: str,
-    tables: list[dict],
-) -> dict:
-    """
-    Given a natural-language question and a list of structured table dicts
-    (each having column_headers and row_data), translate the question to a
-    pandas operation via the LLM and execute it in an isolated subprocess.
-
-    Returns:
-        {
-            "answer": str,           # human-readable answer
-            "table_result": str | None,  # markdown table if result is tabular
-            "data_source": "computed",
-            "success": bool,
-        }
-    """
-    if not tables:
-        return {
-            "answer": "No structured table data found for this document.",
-            "table_result": None,
-            "data_source": "computed",
-            "success": False,
-        }
-
-    # Use the first table for single-doc queries; for multi-doc the caller
-    # has already filtered to the relevant table.
-    table = tables[0]
-    column_headers = table.get("column_headers") or []
-    if isinstance(column_headers, str):
-        column_headers = json.loads(column_headers)
-    row_data = table.get("row_data") or []
-    if isinstance(row_data, str):
-        row_data = json.loads(row_data)
-    sheet_name = table.get("sheet_name")
-
-    # Step 1: LLM translates the question to pandas code
-    genai = get_genai()
-    model = genai.GenerativeModel(GENERATION_MODEL)
-    prompt = _build_translate_prompt(question, column_headers, sheet_name)
+def _query_plan(question: str, tables: list[dict]) -> dict[str, Any] | None:
+    prompt = f"""Turn this spreadsheet question into one JSON query plan. Do not calculate values.
+Available tables: {json.dumps(_metadata(tables))}
+Question: {question}
+Return only JSON: table_id, table_ids (optional array; required for compare), action (aggregate|rows|top|chart|compare), column (or null), aggregate (sum|mean|median|min|max|count or null), filters (array of {{column, operator: eq|ne|gt|gte|lt|lte|contains, value}}), sort_column (or null), descending (boolean), limit (1-25). For comparisons use compare and every relevant table ID. Use only exact IDs and columns shown. If impossible return {{"cannot_answer": true}}."""
     try:
-        response = model.generate_content(prompt)
-        pandas_code = (response.text or "").strip()
-        # Strip markdown fences if model wrapped the code despite instructions
-        if pandas_code.startswith("```"):
-            lines = pandas_code.split("\n")
-            pandas_code = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
-    except Exception as exc:
-        logger.exception("LLM pandas translation failed")
-        return {
-            "answer": f"Could not translate question to a computation: {exc}",
-            "table_result": None,
-            "data_source": "computed",
-            "success": False,
-        }
-
-    if "CANNOT_ANSWER" in pandas_code:
-        return {
-            "answer": "The available table columns don't contain the data needed to answer this question.",
-            "table_result": None,
-            "data_source": "computed",
-            "success": False,
-        }
-
-    # Step 2: Execute the generated pandas code in a restricted subprocess
-    runner_script = textwrap.dedent(f"""
-import pandas as pd
-import json
-import sys
-
-_headers = {json.dumps(column_headers)}
-_rows = {json.dumps(row_data)}
-
-df = pd.DataFrame(_rows, columns=_headers)
-# Coerce numeric columns
-for _col in df.columns:
-    try:
-        df[_col] = pd.to_numeric(df[_col], errors='ignore')
+        text = (get_genai().GenerativeModel(GENERATION_MODEL).generate_content(prompt).text or "").strip()
+        return json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", text).strip())
     except Exception:
-        pass
-
-{pandas_code}
-    """).strip()
-
-    try:
-        proc = subprocess.run(
-            [sys.executable, "-c", runner_script],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        stdout = proc.stdout.strip()
-        stderr = proc.stderr.strip()
-
-        if proc.returncode != 0 or not stdout:
-            logger.warning("Pandas subprocess error: %s", stderr)
-            return {
-                "answer": "The computation produced an error. Please rephrase your question.",
-                "table_result": None,
-                "data_source": "computed",
-                "success": False,
-            }
-
-        # Detect if result is a markdown table (has | separators)
-        is_table = "|" in stdout and "\n" in stdout
-        return {
-            "answer": stdout if not is_table else f"Here is the result:\n\n{stdout}",
-            "table_result": stdout if is_table else None,
-            "data_source": "computed",
-            "success": True,
-        }
-
-    except subprocess.TimeoutExpired:
-        return {
-            "answer": "The computation timed out. Try a simpler question.",
-            "table_result": None,
-            "data_source": "computed",
-            "success": False,
-        }
-    except Exception as exc:
-        logger.exception("Pandas execution failed")
-        return {
-            "answer": f"Computation failed: {exc}",
-            "table_result": None,
-            "data_source": "computed",
-            "success": False,
-        }
+        logger.exception("Structured query planning failed")
+        return None
 
 
-def format_table_preview(tables: list[dict], max_rows: int = 5) -> str:
-    """
-    Returns a short markdown preview of the first table's columns and sample rows,
-    used to enrich the LLM context when it needs to understand a spreadsheet's structure.
-    """
+def _fallback_plan(question: str, tables: list[dict]) -> dict[str, Any] | None:
     if not tables:
-        return ""
-    parts = []
-    for t in tables[:3]:  # preview up to 3 tables/sheets
-        headers = t.get("column_headers") or []
-        if isinstance(headers, str):
-            headers = json.loads(headers)
-        rows = t.get("row_data") or []
-        if isinstance(rows, str):
-            rows = json.loads(rows)
-        sheet = t.get("sheet_name", "")
-        label = f"Sheet: {sheet}\n" if sheet else ""
-        header_line = " | ".join(str(h) for h in headers)
-        sep = " | ".join("---" for _ in headers)
-        row_lines = [" | ".join(str(r.get(h, "")) for h in headers) for r in rows[:max_rows]]
-        parts.append(f"{label}| {header_line} |\n| {sep} |\n" + "\n".join(f"| {r} |" for r in row_lines))
-    return "\n\n".join(parts)
+        return None
+    table = tables[0]
+    columns = table.get("column_headers", [])
+    q = question.lower()
+    column = next((column for column in columns if str(column).lower() in q), None)
+    aggregate = next((name for name in _AGGREGATES if name in q or (name == "mean" and "average" in q)), None)
+    action = "compare" if len(tables) > 1 and any(word in q for word in ("compare", "difference", "increase", "decrease", "across")) else "chart" if any(word in q for word in ("chart", "trend", "plot", "graph")) else "aggregate" if aggregate else "rows"
+    return {"table_id": table.get("id"), "table_ids": [table.get("id") for table in tables] if action == "compare" else None, "action": action, "column": column, "aggregate": aggregate, "filters": [], "sort_column": column, "descending": "lowest" not in q, "limit": 10}
+
+
+def _apply_filters(frame: pd.DataFrame, filters: list[dict]) -> pd.DataFrame:
+    for item in filters:
+        column, operator, value = item.get("column"), item.get("operator"), item.get("value")
+        if column not in frame.columns or operator not in _OPERATORS:
+            continue
+        series = frame[column]
+        numeric = pd.to_numeric(series, errors="coerce")
+        if operator == "contains":
+            frame = frame[series.astype(str).str.contains(str(value), case=False, na=False)]
+        elif operator in {"gt", "gte", "lt", "lte"}:
+            expected = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+            if pd.notna(expected):
+                comparison = {"gt": numeric > expected, "gte": numeric >= expected, "lt": numeric < expected, "lte": numeric <= expected}[operator]
+                frame = frame[comparison]
+        else:
+            matches = series.astype(str).str.lower() == str(value).lower()
+            frame = frame[~matches if operator == "ne" else matches]
+    return frame
+
+
+def _markdown(frame: pd.DataFrame, limit: int) -> str:
+    frame = frame.head(max(1, min(int(limit or 10), 25))).fillna("")
+    headers = [str(column) for column in frame.columns]
+    rows = [[str(value).replace("|", "\\|") for value in row] for row in frame.astype(str).values.tolist()]
+    return "| " + " | ".join(headers) + " |\n| " + " | ".join("---" for _ in headers) + " |\n" + "\n".join("| " + " | ".join(row) + " |" for row in rows)
+
+
+def execute_structured_query(question: str, tables: list[dict]) -> dict[str, Any]:
+    if not tables:
+        return {"answer": "I couldn't find verified structured data for that request.", "success": False}
+    plan = _query_plan(question, tables) or _fallback_plan(question, tables) or {}
+    table = next((candidate for candidate in tables if str(candidate.get("id")) == str(plan.get("table_id"))), None)
+    if plan.get("cannot_answer") or not table or plan.get("action") not in _ACTIONS:
+        return {"answer": "I couldn't match that request to a verified table or column.", "success": False}
+    columns = table.get("column_headers") or []
+    column = plan.get("column")
+    if column and column not in columns or plan.get("aggregate") and plan["aggregate"] not in _AGGREGATES:
+        return {"answer": "I couldn't match that request to a verified table or column.", "success": False}
+
+    frame = _apply_filters(pd.DataFrame(table.get("row_data") or [], columns=columns), plan.get("filters") or [])
+    action = plan["action"]
+    if action == "compare":
+        table_ids = {str(table_id) for table_id in plan.get("table_ids") or []}
+        comparison_tables = [candidate for candidate in tables if str(candidate.get("id")) in table_ids]
+        aggregate = plan.get("aggregate") or "sum"
+        if not column or aggregate not in _AGGREGATES or len(comparison_tables) < 2:
+            return {"answer": "Choose a shared numeric column and at least two verified tables to compare.", "success": False}
+        result_rows = []
+        for candidate in comparison_tables:
+            if column not in (candidate.get("column_headers") or []):
+                continue
+            candidate_frame = _apply_filters(pd.DataFrame(candidate.get("row_data") or [], columns=candidate.get("column_headers") or []), plan.get("filters") or [])
+            values = pd.to_numeric(candidate_frame[column], errors="coerce").dropna()
+            if values.empty:
+                continue
+            value = int(values.notna().sum()) if aggregate == "count" else getattr(values, aggregate)()
+            result_rows.append({"Source": candidate.get("document_name") or candidate.get("table_name"), "Value": value})
+        if len(result_rows) < 2:
+            return {"answer": f"I couldn't find comparable numeric values for {column} in at least two verified tables.", "success": False}
+        result_frame = pd.DataFrame(result_rows)
+        points = [{"label": str(row["Source"]), "value": float(row["Value"])} for row in result_rows]
+        return {"answer": f"Verified comparison of {aggregate} {column}:\n\n" + _markdown(result_frame, 25), "success": True, "table": comparison_tables[0], "tables": comparison_tables, "verification": "verified", "chart": {"type": "bar", "title": f"{column} · verified comparison", "data": points}}
+    if action == "aggregate":
+        aggregate = plan.get("aggregate") or "count"
+        if aggregate == "count":
+            value = int(frame[column].notna().sum()) if column else len(frame)
+        elif not column:
+            return {"answer": "Choose a column to calculate that value from.", "success": False}
+        else:
+            values = pd.to_numeric(frame[column], errors="coerce").dropna()
+            if values.empty:
+                return {"answer": f"{column} does not contain enough numeric values for a verified {aggregate}.", "success": False}
+            value = getattr(values, aggregate)()
+        label = {"mean": "average", "sum": "sum", "median": "median", "min": "minimum", "max": "maximum", "count": "count"}[aggregate]
+        display = f"{value:,.2f}" if isinstance(value, float) else f"{value:,}"
+        return {"answer": f"Verified result: the {label} of {column or 'rows'} is **{display}**.", "success": True, "table": table, "verification": "verified"}
+
+    sort_column = plan.get("sort_column") if plan.get("sort_column") in frame.columns else column
+    if sort_column:
+        frame = frame.assign(__sort=pd.to_numeric(frame[sort_column], errors="coerce")).sort_values("__sort", ascending=not bool(plan.get("descending", True)), na_position="last").drop(columns="__sort")
+    chart = None
+    if action == "chart" and column:
+        values = pd.to_numeric(frame[column], errors="coerce")
+        label_column = next((candidate for candidate in frame.columns if candidate != column), None)
+        points = [{"label": str(frame.loc[index, label_column]) if label_column else str(index + 1), "value": float(value)} for index, value in values.items() if pd.notna(value)][:25]
+        if points:
+            chart = {"type": "line" if len(points) > 2 else "bar", "title": f"{column} · verified data", "data": points}
+    return {"answer": "Here are the verified rows from the structured data:\n\n" + _markdown(frame, plan.get("limit", 10)), "success": True, "table": table, "verification": "verified", "chart": chart}

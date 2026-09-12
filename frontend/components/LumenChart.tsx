@@ -204,7 +204,7 @@ export default function LumenChart({
         {chartType === "donut" && (
           <div className="lumen-donut-layout">
             <div className="lumen-donut-graphic">
-              <svg viewBox="0 0 160 160" width="130" height="130">
+              <svg viewBox="0 0 160 160" width="170" height="170">
                 {(() => {
                   let accumulated = 0;
                   const radius = 56;
@@ -241,10 +241,10 @@ export default function LumenChart({
                     );
                   });
                 })()}
-                <text x="80" y="77" textAnchor="middle" fill="var(--paper)" fontSize="14" fontWeight="600">
+                <text x="80" y="75" textAnchor="middle" fill="var(--paper)" fontSize="18" fontWeight="700">
                   {validData.length}
                 </text>
-                <text x="80" y="93" textAnchor="middle" fill="var(--quiet)" fontSize="9" letterSpacing="0.05em">
+                <text x="80" y="91" textAnchor="middle" fill="var(--quiet)" fontSize="10" letterSpacing="0.08em">
                   ITEMS
                 </text>
               </svg>

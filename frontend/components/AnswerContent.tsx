@@ -1,270 +1,142 @@
 "use client";
 
-import { Fragment, useState } from "react";
-import LumenChart, { ChartDataPoint } from "./LumenChart";
+import { Fragment } from "react";
+import LumenChart from "./LumenChart";
 
-// ─── Inline text renderer (bold, etc.) ───────────────────────────────────────
 function InlineText({ text }: { text: string }) {
-  // Handle [n] citation markers
-  const parts = text.split(/(\*\*[^*]+\*\*|\[\d+\])/g);
+  const parts = text.split(/(\*\*[^*]+\*\*|\[\d+(?:,\s*\d+)*\])/g);
   return (
     <>
       {parts.map((part, i) => {
-        if (part.startsWith("**") && part.endsWith("**"))
+        if (part.startsWith("**") && part.endsWith("**")) {
           return <strong key={i}>{part.slice(2, -2)}</strong>;
-        if (/^\[\d+\]$/.test(part))
-          return (
-            <sup key={i} className="citation-ref">
-              {part}
-            </sup>
-          );
+        }
+        if (/^\[\d/.test(part)) {
+          return <sup key={i} className="inline-cite">{part}</sup>;
+        }
         return <Fragment key={i}>{part}</Fragment>;
       })}
     </>
   );
 }
 
-// ─── Chart block parser ────────────────────────────────────────────────────────
-interface ChartBlock {
-  type: "bar" | "line" | "donut" | "pie";
-  title?: string;
-  subtitle?: string;
-  data: ChartDataPoint[];
-}
+function splitCodeBlocks(content: string): Array<{ type: "text" | "chart" | "code"; raw: string; lang?: string }> {
+  const segments: Array<{ type: "text" | "chart" | "code"; raw: string; lang?: string }> = [];
+  const fenceRe = /^```(\w*)\n([\s\S]*?)^```/gm;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
 
-function parseChartBlock(raw: string): ChartBlock | null {
-  try {
-    const parsed = JSON.parse(raw.trim());
-    if (!parsed.data || !Array.isArray(parsed.data)) return null;
-    return parsed as ChartBlock;
-  } catch {
-    return null;
-  }
-}
-
-// ─── Smart table with auto-chart ──────────────────────────────────────────────
-function extractNumericSeries(
-  headers: string[],
-  rows: string[][]
-): ChartDataPoint[] | null {
-  // Find the first numeric column
-  for (let col = 1; col < headers.length; col++) {
-    const vals = rows.map((r) => {
-      const raw = (r[col] || "").replace(/[₹$€£,\s%]/g, "");
-      return parseFloat(raw);
-    });
-    if (vals.every((v) => !isNaN(v))) {
-      return rows.map((r, i) => ({
-        label: r[0] || `Row ${i + 1}`,
-        value: vals[i],
-        formattedValue: r[col],
-      }));
+  while ((match = fenceRe.exec(content)) !== null) {
+    if (match.index > lastIndex) {
+      segments.push({ type: "text", raw: content.slice(lastIndex, match.index) });
     }
+    const lang = match[1].toLowerCase();
+    const body = match[2];
+    if (lang === "chart") {
+      segments.push({ type: "chart", raw: body });
+    } else {
+      segments.push({ type: "code", raw: body, lang });
+    }
+    lastIndex = match.index + match[0].length;
   }
-  return null;
+
+  if (lastIndex < content.length) {
+    segments.push({ type: "text", raw: content.slice(lastIndex) });
+  }
+
+  return segments;
 }
 
-function SmartTable({
-  headers,
-  rows,
-}: {
-  headers: string[];
-  rows: string[][];
-}) {
-  const series = extractNumericSeries(headers, rows);
-  const [showChart, setShowChart] = useState(true);
-
-  return (
-    <div className="smart-table-wrap">
-      {/* Table */}
-      <div className="smart-table-scroll">
-        <table className="smart-table">
-          <thead>
-            <tr>
-              {headers.map((h, i) => (
-                <th key={i}>{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row, ri) => (
-              <tr key={ri}>
-                {row.map((cell, ci) => (
-                  <td key={ci}>{cell}</td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      {/* Auto-chart if numeric data exists */}
-      {series && series.length >= 2 && (
-        <div className="smart-chart-area">
-          <button
-            className="smart-chart-toggle"
-            onClick={() => setShowChart((v) => !v)}
-          >
-            {showChart ? "▾ Hide chart" : "▸ Show chart"}
-          </button>
-          {showChart && (
-            <LumenChart
-              type={series.length > 5 ? "line" : "bar"}
-              data={series}
-            />
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── Table parser ─────────────────────────────────────────────────────────────
-function isTableSeparator(line: string) {
-  return /^\s*\|?[\s\-:]+(\|[\s\-:]+)*\|?\s*$/.test(line) && line.includes("-");
-}
-
-function parseTableLine(line: string): string[] {
-  return line
-    .replace(/^\|/, "")
-    .replace(/\|$/, "")
-    .split("|")
-    .map((c) => c.trim());
-}
-
-// ─── Main component ───────────────────────────────────────────────────────────
-export default function AnswerContent({ content }: { content: string }) {
+function parseMarkdownLines(text: string): React.ReactNode[] {
+  const lines = text.split("\n");
   const nodes: React.ReactNode[] = [];
-  const lines = content.split("\n");
-  let i = 0;
-  let listItems: string[] = [];
-  let listOrdered = false;
+  let list: string[] = [];
+  let table: string[][] = [];
 
   const flushList = () => {
-    if (!listItems.length) return;
-    const Tag = listOrdered ? "ol" : "ul";
-    nodes.push(
-      <Tag key={`list-${nodes.length}`} className="answer-list">
-        {listItems.map((item, idx) => (
-          <li key={idx}>
-            <InlineText text={item} />
-          </li>
-        ))}
-      </Tag>
-    );
-    listItems = [];
+    if (list.length) {
+      nodes.push(
+        <ul key={`list-${nodes.length}`} className="answer-list">
+          {list.map((item, i) => <li key={i}><InlineText text={item} /></li>)}
+        </ul>
+      );
+      list = [];
+    }
   };
 
-  while (i < lines.length) {
-    const line = lines[i];
-
-    // ── Chart code block ──────────────────────────────────────────────────────
-    if (line.trimStart().startsWith("```chart")) {
-      flushList();
-      const rawLines: string[] = [];
-      i++;
-      while (i < lines.length && !lines[i].trimStart().startsWith("```")) {
-        rawLines.push(lines[i]);
-        i++;
-      }
-      i++; // consume closing ```
-      const block = parseChartBlock(rawLines.join("\n"));
-      if (block) {
+  const flushTable = () => {
+    if (table.length >= 2) {
+      const [headers, divider, ...rows] = table;
+      if (divider && divider.every((cell) => /^:?-{3,}:?$/.test(cell.trim()))) {
         nodes.push(
-          <LumenChart
-            key={`chart-${nodes.length}`}
-            type={block.type}
-            title={block.title}
-            subtitle={block.subtitle}
-            data={block.data}
-          />
+          <div className="answer-table-wrap" key={`table-${nodes.length}`}>
+            <table className="answer-table">
+              <thead><tr>{headers.map((cell, i) => <th key={i}><InlineText text={cell} /></th>)}</tr></thead>
+              <tbody>{rows.map((row, ri) => <tr key={ri}>{headers.map((_, ci) => <td key={ci}><InlineText text={row[ci] ?? ""} /></td>)}</tr>)}</tbody>
+            </table>
+          </div>
         );
-      }
-      continue;
-    }
-
-    // ── Generic code block ────────────────────────────────────────────────────
-    if (line.trimStart().startsWith("```")) {
-      flushList();
-      const lang = line.trim().replace(/^```/, "").trim();
-      const codeLines: string[] = [];
-      i++;
-      while (i < lines.length && !lines[i].trimStart().startsWith("```")) {
-        codeLines.push(lines[i]);
-        i++;
-      }
-      i++;
-      nodes.push(
-        <pre key={`code-${nodes.length}`} className="answer-code">
-          <code data-lang={lang || undefined}>{codeLines.join("\n")}</code>
-        </pre>
-      );
-      continue;
-    }
-
-    // ── Markdown table ────────────────────────────────────────────────────────
-    if (line.includes("|")) {
-      const next = lines[i + 1] || "";
-      if (isTableSeparator(next)) {
-        flushList();
-        const headers = parseTableLine(line);
-        i += 2; // skip header + separator
-        const rows: string[][] = [];
-        while (i < lines.length && lines[i].includes("|")) {
-          rows.push(parseTableLine(lines[i]));
-          i++;
-        }
-        nodes.push(
-          <SmartTable key={`table-${nodes.length}`} headers={headers} rows={rows} />
-        );
-        continue;
+      } else {
+        table.forEach((row, ri) => nodes.push(<p key={`tl-${ri}`}><InlineText text={row.join(" | ")} /></p>));
       }
     }
+    table = [];
+  };
 
-    // ── Headings ──────────────────────────────────────────────────────────────
-    const headingMatch = line.match(/^(#{1,3})\s+(.+)/);
-    if (headingMatch) {
+  lines.forEach((line, index) => {
+    if (/^\s*\|.+\|\s*$/.test(line)) {
       flushList();
-      const level = headingMatch[1].length;
-      const Tag = `h${Math.min(level + 2, 6)}` as keyof JSX.IntrinsicElements;
-      nodes.push(
-        <Tag key={`h-${i}`}>
-          <InlineText text={headingMatch[2]} />
-        </Tag>
-      );
-      i++;
-      continue;
+      table.push(line.trim().slice(1, -1).split("|").map((c) => c.trim()));
+      return;
     }
-
-    // ── List items ────────────────────────────────────────────────────────────
-    const bulletMatch = line.match(/^\s*[-*•]\s+(.+)/);
-    const numberedMatch = line.match(/^\s*\d+[.)]\s+(.+)/);
-    if (bulletMatch || numberedMatch) {
-      if (listItems.length && listOrdered !== !!numberedMatch) flushList();
-      listOrdered = !!numberedMatch;
-      listItems.push((bulletMatch ?? numberedMatch)![1]);
-      i++;
-      continue;
-    }
-
-    // ── Blank line ─────────────────────────────────────────────────────────────
-    if (!line.trim()) {
-      flushList();
-      i++;
-      continue;
-    }
-
-    // ── Paragraph ─────────────────────────────────────────────────────────────
+    flushTable();
+    const bullet = line.match(/^\s*[-*•]\s+(.+)/);
+    const numbered = line.match(/^\s*\d+[.)]\s+(.+)/);
+    if (bullet || numbered) { list.push((bullet ?? numbered)![1]); return; }
     flushList();
-    nodes.push(
-      <p key={`p-${i}`}>
-        <InlineText text={line} />
-      </p>
-    );
-    i++;
-  }
+    if (!line.trim()) return;
+    const heading = line.match(/^#{1,3}\s+(.+)/);
+    if (heading) { nodes.push(<h3 key={`h-${index}`}><InlineText text={heading[1]} /></h3>); return; }
+    nodes.push(<p key={`p-${index}`}><InlineText text={line} /></p>);
+  });
 
   flushList();
+  flushTable();
+  return nodes;
+}
 
-  return <div className="answer-content">{nodes}</div>;
+export default function AnswerContent({ content }: { content: string }) {
+  const segments = splitCodeBlocks(content);
+
+  return (
+    <div className="answer-content">
+      {segments.map((seg, i) => {
+        if (seg.type === "chart") {
+          try {
+            const parsed = JSON.parse(seg.raw.trim());
+            if (parsed && Array.isArray(parsed.data) && parsed.data.length > 0) {
+              return (
+                <LumenChart
+                  key={`chart-${i}`}
+                  type={parsed.type ?? "bar"}
+                  title={parsed.title}
+                  subtitle={parsed.subtitle}
+                  data={parsed.data}
+                />
+              );
+            }
+          } catch {
+            // malformed JSON → show as code block
+          }
+          return <pre key={`chart-err-${i}`} className="answer-code"><code>{seg.raw}</code></pre>;
+        }
+
+        if (seg.type === "code") {
+          return <pre key={`code-${i}`} className="answer-code"><code>{seg.raw}</code></pre>;
+        }
+
+        return <Fragment key={`text-${i}`}>{parseMarkdownLines(seg.raw)}</Fragment>;
+      })}
+    </div>
+  );
 }

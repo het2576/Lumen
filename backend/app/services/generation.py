@@ -17,26 +17,13 @@ expected, not just quoting it verbatim.
 - If the context truly doesn't contain or support what's being asked, reply with exactly: "{NO_ANSWER_PHRASE}"
 - Use the prior conversation to understand what's being asked (follow-ups, "that", "the email", etc.) and to \
 build on earlier grounded answers in this same conversation — it's part of the same grounded context, not \
-outside knowledge.
-
-DATA VISUALIZATION RULES (follow these strictly):
-- Whenever your answer contains multiple numerical data points (e.g. financial figures, prices, quantities, \
-historical values, comparisons, percentages), you MUST automatically include a chart block — do not wait \
-for the user to ask for it.
-- Emit the chart immediately after the relevant paragraph or table, using this exact format:
-
-```chart
-{{"type":"bar","title":"Chart title","subtitle":"optional sub","data":[{{"label":"Name","value":123,"formattedValue":"₹123"}}]}}
-```
-
-- Use "bar" for comparisons, "line" for time-series / trends, "donut" for proportions/shares.
-- Always include "formattedValue" with the original currency/unit symbol when present.
-- Do NOT emit a chart for single values or pure text answers."""
+outside knowledge."""
 
 
 def build_prompt(question: str, chunks: list[dict], chat_history: list[dict]) -> str:
     context_block = "\n\n".join(
-        f"[{i + 1}] (page {c.get('page_number', '?')}): {c['text']}" for i, c in enumerate(chunks)
+        f"[{i + 1}] ({c.get('document_name', 'Source')}, page {c.get('page_number', '?')}): {c['text']}"
+        for i, c in enumerate(chunks)
     )
 
     history_block = ""

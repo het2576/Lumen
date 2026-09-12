@@ -18,11 +18,11 @@ def get_client() -> Client:
     return _client
 
 
-def create_document(filename: str, user_id: str) -> str:
+def create_document(filename: str, user_id: str, *, source_url: Optional[str] = None) -> str:
     res = (
         get_client()
         .table("documents")
-        .insert({"filename": filename, "status": "processing", "user_id": user_id})
+        .insert({"filename": filename, "status": "processing", "user_id": user_id, "source_url": source_url})
         .execute()
     )
     return res.data[0]["id"]
@@ -91,6 +91,44 @@ def insert_chunks(document_id: str, chunks: list[dict]) -> None:
         get_client().table("document_chunks").insert(rows[i : i + batch_size]).execute()
 
 
+def insert_document_tables(document_id: str, tables: list[dict]) -> None:
+    """Persist native spreadsheet/PDF tables without flattening them into chunks."""
+    if not tables:
+        return
+    rows = [
+        {
+            "document_id": document_id,
+            "table_name": table["table_name"],
+            "page_number": table.get("page_number"),
+            "column_headers": table["column_headers"],
+            "row_data": table["row_data"],
+            "inferred_types": table.get("inferred_types", {}),
+            "source_kind": table.get("source_kind", "spreadsheet"),
+            "verified": table.get("verified", True),
+        }
+        for table in tables
+        if table.get("column_headers") and table.get("row_data")
+    ]
+    if not rows:
+        return
+    for i in range(0, len(rows), 50):
+        get_client().table("document_tables").insert(rows[i : i + 50]).execute()
+
+
+def get_document_tables(document_ids: list[str]) -> list[dict]:
+    if not document_ids:
+        return []
+    return (
+        get_client()
+        .table("document_tables")
+        .select("*")
+        .in_("document_id", document_ids)
+        .order("created_at")
+        .execute()
+        .data
+    )
+
+
 def get_document_chunks(document_id: str) -> list[dict]:
     res = (
         get_client()
@@ -103,14 +141,37 @@ def get_document_chunks(document_id: str) -> list[dict]:
     return res.data
 
 
-def create_conversation(document_id: str) -> str:
-    res = get_client().table("conversations").insert({"document_id": document_id}).execute()
-    return res.data[0]["id"]
+def create_conversation(document_ids: list[str]) -> str:
+    if not document_ids:
+        raise ValueError("A conversation requires at least one document.")
+    res = get_client().table("conversations").insert({"document_id": document_ids[0]}).execute()
+    conversation_id = res.data[0]["id"]
+    get_client().table("conversation_documents").insert(
+        [{"conversation_id": conversation_id, "document_id": document_id} for document_id in document_ids]
+    ).execute()
+    return conversation_id
 
 
 def get_conversation(conversation_id: str) -> Optional[dict]:
     res = get_client().table("conversations").select("*").eq("id", conversation_id).limit(1).execute()
     return res.data[0] if res.data else None
+
+
+def get_conversation_document_ids(conversation_id: str) -> list[str]:
+    rows = (
+        get_client()
+        .table("conversation_documents")
+        .select("document_id")
+        .eq("conversation_id", conversation_id)
+        .execute()
+        .data
+    )
+    # A conversation created before the migration will be backfilled by SQL;
+    # this fallback also keeps it readable if the migration is being rolled out.
+    if rows:
+        return [row["document_id"] for row in rows]
+    conversation = get_conversation(conversation_id)
+    return [conversation["document_id"]] if conversation and conversation.get("document_id") else []
 
 
 def save_message(

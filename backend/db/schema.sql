@@ -6,6 +6,7 @@ create table if not exists documents (
   id uuid primary key default gen_random_uuid(),
   user_id uuid references auth.users(id) on delete cascade,
   filename text not null,
+  source_url text,
   uploaded_at timestamptz default now(),
   status text not null default 'processing', -- processing | ready | failed
   page_count int,
@@ -17,6 +18,7 @@ create table if not exists documents (
 -- get user_id = null (orphaned demo data) — the app never returns null-owner documents to
 -- anyone, since every query filters by the requesting user's id.
 alter table documents add column if not exists user_id uuid references auth.users(id) on delete cascade;
+alter table documents add column if not exists source_url text;
 
 create index if not exists documents_user_id_idx
   on documents (user_id);
@@ -30,6 +32,24 @@ create table if not exists document_chunks (
   embedding vector(768), -- Gemini text-embedding-004 dimension
   created_at timestamptz default now()
 );
+
+-- Structured data is intentionally kept apart from vector chunks.  A row is a
+-- table/sheet, not an LLM-produced text representation of one.
+create table if not exists document_tables (
+  id uuid primary key default gen_random_uuid(),
+  document_id uuid not null references documents(id) on delete cascade,
+  table_name text not null,
+  page_number int,
+  column_headers jsonb not null default '[]'::jsonb,
+  row_data jsonb not null default '[]'::jsonb,
+  inferred_types jsonb not null default '{}'::jsonb,
+  source_kind text not null default 'spreadsheet', -- spreadsheet | pdf_table
+  verified boolean not null default true,
+  created_at timestamptz default now()
+);
+
+create index if not exists document_tables_document_id_idx
+  on document_tables (document_id);
 
 create index if not exists document_chunks_embedding_idx
   on document_chunks using ivfflat (embedding vector_cosine_ops) with (lists = 100);
@@ -45,6 +65,19 @@ create table if not exists conversations (
   document_id uuid references documents(id) on delete cascade,
   created_at timestamptz default now()
 );
+
+-- New conversations can contain several sources.  conversations.document_id is
+-- retained as the primary/legacy source so existing installations continue to
+-- work during this migration.
+create table if not exists conversation_documents (
+  conversation_id uuid not null references conversations(id) on delete cascade,
+  document_id uuid not null references documents(id) on delete cascade,
+  primary key (conversation_id, document_id)
+);
+
+insert into conversation_documents (conversation_id, document_id)
+select id, document_id from conversations where document_id is not null
+on conflict do nothing;
 
 create table if not exists messages (
   id uuid primary key default gen_random_uuid(),
@@ -82,6 +115,12 @@ alter table query_log drop constraint if exists query_log_document_id_fkey;
 alter table query_log add constraint query_log_document_id_fkey
   foreign key (document_id) references documents(id) on delete cascade;
 
+-- PostgreSQL does not allow CREATE OR REPLACE to change a function's OUT
+-- columns. Drop these app-owned RPCs first so this schema stays rerunnable
+-- across older project versions.
+drop function if exists match_document_chunks(uuid, vector, integer);
+drop function if exists keyword_search_document_chunks(uuid, text, integer);
+
 -- Semantic search via RPC (cosine similarity, filtered to one document).
 create or replace function match_document_chunks(
   p_document_id uuid,
@@ -115,7 +154,9 @@ $$;
 -- policies matter only if something ever queries Supabase directly with the anon key.
 alter table documents enable row level security;
 alter table document_chunks enable row level security;
+alter table document_tables enable row level security;
 alter table conversations enable row level security;
+alter table conversation_documents enable row level security;
 alter table messages enable row level security;
 alter table query_log enable row level security;
 
@@ -129,10 +170,26 @@ create policy "Users access chunks of their documents" on document_chunks
     exists (select 1 from documents d where d.id = document_chunks.document_id and d.user_id = auth.uid())
   );
 
+drop policy if exists "Users access tables of their documents" on document_tables;
+create policy "Users access tables of their documents" on document_tables
+  for all using (
+    exists (select 1 from documents d where d.id = document_tables.document_id and d.user_id = auth.uid())
+  );
+
 drop policy if exists "Users access their own conversations" on conversations;
 create policy "Users access their own conversations" on conversations
   for all using (
     exists (select 1 from documents d where d.id = conversations.document_id and d.user_id = auth.uid())
+  );
+
+drop policy if exists "Users access conversation sources" on conversation_documents;
+create policy "Users access conversation sources" on conversation_documents
+  for all using (
+    exists (
+      select 1 from conversations c
+      join documents d on d.id = c.document_id
+      where c.id = conversation_documents.conversation_id and d.user_id = auth.uid()
+    )
   );
 
 drop policy if exists "Users access messages in their conversations" on messages;
