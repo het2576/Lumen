@@ -1,5 +1,6 @@
-import logging
 import ipaddress
+import logging
+import re
 import socket
 from pathlib import Path
 from urllib.parse import urlparse
@@ -9,10 +10,14 @@ import pandas as pd
 import pdfplumber
 import tiktoken
 import trafilatura
+from google.genai import errors as genai_errors
+from google.genai import types as genai_types
 
 from app import db
 from app.config import CHUNK_OVERLAP_TOKENS, CHUNK_SIZE_TOKENS
+from app.services import gemini_client
 from app.services.embeddings import embed_texts
+from app.services.spreadsheet import to_number
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +95,7 @@ def _infer_types(rows: list[dict], headers: list[str]) -> dict[str, str]:
         if not values:
             inferred[header] = "text"
             continue
-        numeric = pd.to_numeric(pd.Series(values), errors="coerce").notna().mean()
+        numeric = to_number(pd.Series(values)).notna().mean()
         dates = pd.to_datetime(pd.Series(values), errors="coerce", format="mixed").notna().mean()
         inferred[header] = "numeric" if numeric >= 0.8 else "date" if dates >= 0.8 else "text"
     return inferred
@@ -188,55 +193,76 @@ def embed_chunks(chunks: list[dict]) -> list[dict]:
     return [{**chunk, "embedding": vector} for chunk, vector in zip(chunks, vectors)]
 
 
-def ingest_document(file_path: str, document_id: str) -> None:
+def _read_local(extract, file_path: str):
+    """Parsing a local file is deterministic: if it fails once it fails every time, so report
+    it as unusable input (ValueError) instead of letting the queue retry it."""
     try:
-        suffix = Path(file_path).suffix.lower()
-        if suffix in {".csv", ".xlsx"}:
-            tables = extract_spreadsheet_tables(file_path)
-            if not tables:
-                raise ValueError("No usable rows or columns were found in this spreadsheet.")
-            db.insert_document_tables(document_id, tables)
-            db.update_document_status(document_id, "ready", page_count=len(tables), chunk_count=0)
-            return
+        return extract(file_path)
+    except Exception as exc:
+        kind = Path(file_path).suffix.lstrip(".").upper() or "file"
+        raise ValueError(f"Lumen couldn't read this {kind}. It may be damaged or not a real {kind} file ({type(exc).__name__}).") from exc
 
-        pages = extract_text(file_path)
-        if not pages:
-            raise ValueError("No extractable text found in PDF (it may be scanned/image-only).")
 
-        chunks = chunk_text(pages)
-        if not chunks:
-            raise ValueError("Text extracted but chunking produced no chunks.")
+def ingest_file_or_raise(file_path: str, document_id: str) -> None:
+    """Index a PDF/CSV/XLSX and mark the document ready. Raises on failure (the queue decides
+    whether to retry); ValueError means the input itself is unusable."""
+    suffix = Path(file_path).suffix.lower()
+    if suffix in {".csv", ".xlsx"}:
+        tables = _read_local(extract_spreadsheet_tables, file_path)
+        if not tables:
+            raise ValueError("No usable rows or columns were found in this spreadsheet.")
+        db.insert_document_tables(document_id, tables)
+        db.update_document_status(document_id, "ready", page_count=len(tables), chunk_count=0)
+        return
 
-        embedded_chunks = embed_chunks(chunks)
-        db.insert_chunks(document_id, embedded_chunks)
-        try:
-            db.insert_document_tables(document_id, extract_pdf_tables(file_path))
-        except Exception:
-            # Table detection is an enhancement; it must not make a readable
-            # document unusable when a malformed table confuses the extractor.
-            logger.exception("Table extraction failed for document %s", document_id)
+    pages = _read_local(extract_text, file_path)
+    if not pages:
+        raise ValueError("No extractable text found in PDF (it may be scanned/image-only).")
 
-        db.update_document_status(
-            document_id,
-            "ready",
-            page_count=len(pages),
-            chunk_count=len(embedded_chunks),
-        )
+    chunks = chunk_text(pages)
+    if not chunks:
+        raise ValueError("Text extracted but chunking produced no chunks.")
+
+    embedded_chunks = embed_chunks(chunks)
+    db.insert_chunks(document_id, embedded_chunks)
+    try:
+        db.insert_document_tables(document_id, extract_pdf_tables(file_path))
+    except Exception:
+        # Table detection is an enhancement; it must not make a readable
+        # document unusable when a malformed table confuses the extractor.
+        logger.exception("Table extraction failed for document %s", document_id)
+
+    db.update_document_status(
+        document_id,
+        "ready",
+        page_count=len(pages),
+        chunk_count=len(embedded_chunks),
+    )
+
+
+def ingest_document(file_path: str, document_id: str) -> None:
+    """Synchronous entry point for scripts and evals: never raises, records failure instead."""
+    try:
+        ingest_file_or_raise(file_path, document_id)
     except Exception as e:
         logger.exception("Ingestion failed for document %s", document_id)
         db.update_document_status(document_id, "failed", error_message=str(e)[:500])
 
 
-def ingest_webpage(url: str, document_id: str) -> None:
+def ingest_webpage_or_raise(url: str, document_id: str) -> None:
     """Ingest a readable webpage through the same chunk and embedding flow as a PDF."""
+    text = _fetch_webpage(url)
+    chunks = chunk_text([{"text": text, "page_number": 1}])
+    if not chunks:
+        raise ValueError("The webpage did not contain enough readable text to index.")
+    embedded_chunks = embed_chunks(chunks)
+    db.insert_chunks(document_id, embedded_chunks)
+    db.update_document_status(document_id, "ready", page_count=1, chunk_count=len(embedded_chunks))
+
+
+def ingest_webpage(url: str, document_id: str) -> None:
     try:
-        text = _fetch_webpage(url)
-        chunks = chunk_text([{"text": text, "page_number": 1}])
-        if not chunks:
-            raise ValueError("The webpage did not contain enough readable text to index.")
-        embedded_chunks = embed_chunks(chunks)
-        db.insert_chunks(document_id, embedded_chunks)
-        db.update_document_status(document_id, "ready", page_count=1, chunk_count=len(embedded_chunks))
+        ingest_webpage_or_raise(url, document_id)
     except Exception as exc:
         logger.exception("Webpage ingestion failed for document %s", document_id)
         db.update_document_status(document_id, "failed", error_message=str(exc)[:500])
@@ -244,154 +270,133 @@ def ingest_webpage(url: str, document_id: str) -> None:
 
 def _parse_youtube_id(url: str) -> str:
     """Extract the 11-character video ID from any common YouTube URL format."""
-    import re
-    patterns = [
-        r"(?:v=|youtu\.be/|/embed/|/shorts/)([A-Za-z0-9_-]{11})",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, url)
+    match = re.search(r"(?:v=|youtu\.be/|/embed/|/shorts/|/live/)([A-Za-z0-9_-]{11})", url)
+    if not match:
+        raise ValueError("Could not find a valid YouTube video ID in that URL.")
+    return match.group(1)
+
+
+_CAPTION_LANGUAGES = [
+    "en", "en-IN", "en-US", "en-GB",
+    "hi", "hi-IN",
+    "ta", "te", "mr", "bn", "gu", "kn", "ml", "pa", "es", "fr", "de",
+]
+_TIMESTAMPED_LINE = re.compile(r"^\s*\[?(?:(\d{1,2}):)?(\d{1,2}):(\d{2})\]?\s*[-–:]?\s*(.+)$")
+_TRANSCRIBE_PROMPT = (
+    "Transcribe the spoken audio of this video verbatim in its original language. "
+    "Output only lines formatted as [MM:SS] text (use [H:MM:SS] past the first hour), "
+    "one line per sentence or short passage. No headings or commentary."
+)
+
+
+def _fetch_caption_segments(video_id: str) -> list[tuple[float, str]]:
+    """Read YouTube's own caption track — fast and free, but YouTube blocks most cloud-provider IPs."""
+    from youtube_transcript_api import NoTranscriptFound, YouTubeTranscriptApi  # type: ignore
+
+    transcripts = YouTubeTranscriptApi().list(video_id)
+    try:
+        transcript = transcripts.find_transcript(_CAPTION_LANGUAGES)
+    except NoTranscriptFound:
+        transcript = next(iter(transcripts), None)
+    if transcript is None:
+        raise ValueError("This video has no caption tracks.")
+    segments = [(float(snippet.start), snippet.text) for snippet in transcript.fetch()]
+    if not segments:
+        raise ValueError("The caption track was empty.")
+    return segments
+
+
+def _transcribe_with_gemini(video_id: str) -> list[tuple[float, str]]:
+    """Have Gemini transcribe the video. Google fetches the video itself, so this works from
+    cloud hosts that YouTube blocks, and for videos that have no captions at all."""
+    contents = genai_types.Content(role="user", parts=[
+        genai_types.Part(
+            file_data=genai_types.FileData(file_uri=f"https://www.youtube.com/watch?v={video_id}"),
+            video_metadata=genai_types.VideoMetadata(fps=0.1),
+        ),
+        genai_types.Part(text=_TRANSCRIBE_PROMPT),
+    ])
+    try:
+        response = gemini_client.generate(
+            contents,
+            # Only the audio matters for a transcript; sparse low-resolution frames keep a
+            # one-hour video near 90k input tokens.
+            config={"media_resolution": genai_types.MediaResolution.MEDIA_RESOLUTION_LOW, "temperature": 0, "max_output_tokens": 65536},
+            timeout=900,
+            name="transcribe",
+        )
+    except genai_errors.APIError as exc:
+        if gemini_client.is_transient(exc):
+            raise  # the ingestion queue retries these
+        raise ValueError(f"Gemini couldn't read this video ({exc.code}): {str(exc.message or exc)[:240]}") from exc
+
+    text = response.text or ""
+    candidate = (response.candidates or [None])[0]
+    if candidate is not None and candidate.finish_reason == genai_types.FinishReason.MAX_TOKENS:
+        logger.warning("Gemini transcript for %s hit the output limit; indexing the part returned", video_id)
+
+    segments = []
+    for line in text.splitlines():
+        match = _TIMESTAMPED_LINE.match(line)
         if match:
-            return match.group(1)
-    raise ValueError("Could not find a valid YouTube video ID in that URL.")
+            hours, minutes, seconds, spoken = match.groups()
+            segments.append((int(hours or 0) * 3600 + int(minutes) * 60 + int(seconds), spoken.strip()))
+    return segments
+
+
+def _segments_to_paragraphs(segments: list[tuple[float, str]], block_seconds: float = 120.0) -> list[dict]:
+    """Merge timed segments into ~2-minute paragraphs for better retrieval context."""
+    paragraphs: list[dict] = []
+    current: list[str] = []
+    block_start = 0.0
+    for start, raw_text in segments:
+        text = raw_text.strip().replace("\n", " ")
+        if not text:
+            continue
+        if not current:
+            block_start = start
+        current.append(text)
+        if start - block_start >= block_seconds:
+            paragraphs.append({"text": " ".join(current), "page_number": len(paragraphs) + 1})
+            current = []
+    if current:
+        paragraphs.append({"text": " ".join(current), "page_number": len(paragraphs) + 1})
+    return paragraphs
+
+
+def ingest_youtube_or_raise(url: str, document_id: str) -> None:
+    """Index a YouTube video from its captions when reachable, otherwise from a Gemini transcription."""
+    video_id = _parse_youtube_id(url)
+    try:
+        segments = _fetch_caption_segments(video_id)
+        source = "captions"
+    except Exception as caption_error:
+        logger.warning(
+            "Captions unavailable for %s (%s: %s); transcribing with Gemini",
+            video_id, type(caption_error).__name__, str(caption_error)[:160],
+        )
+        segments = _transcribe_with_gemini(video_id)
+        source = "gemini"
+
+    paragraphs = _segments_to_paragraphs(segments)
+    if not paragraphs:
+        raise ValueError("No speech could be transcribed from this video.")
+    chunks = chunk_text(paragraphs)
+    if not chunks:
+        raise ValueError("The transcript was too short to index.")
+
+    embedded_chunks = embed_chunks(chunks)
+    db.insert_chunks(document_id, embedded_chunks)
+    db.update_document_status(document_id, "ready", page_count=len(paragraphs), chunk_count=len(embedded_chunks))
+    logger.info(
+        "YouTube ingestion done: video=%s source=%s paragraphs=%d chunks=%d",
+        video_id, source, len(paragraphs), len(embedded_chunks),
+    )
 
 
 def ingest_youtube(url: str, document_id: str) -> None:
-    """Fetch a YouTube transcript, merge it into paragraphs, then chunk and embed.
-    Supports English, Hindi, and any available caption tracks or auto-generated captions.
-    """
     try:
-        from youtube_transcript_api import (  # type: ignore
-            YouTubeTranscriptApi,
-            TranscriptsDisabled,
-            NoTranscriptFound,
-            VideoUnavailable,
-            VideoUnplayable,
-            CouldNotRetrieveTranscript,
-        )
-
-        video_id = _parse_youtube_id(url)
-        ytt = YouTubeTranscriptApi()
-
-        # Preferred languages in priority order — covers English, Hindi, and regional languages.
-        PREFERRED_LANGS = [
-            "en", "en-IN", "en-US", "en-GB",
-            "hi", "hi-IN",
-            "ta", "te", "mr", "bn", "gu", "kn", "ml", "pa", "es", "fr", "de",
-        ]
-
-        segments = None
-        used_lang = "unknown"
-
-        try:
-            tx_list = ytt.list(video_id)
-            transcript = None
-
-            # 1. Try finding transcript in preferred languages (manual or auto-generated)
-            try:
-                transcript = tx_list.find_transcript(PREFERRED_LANGS)
-            except Exception:
-                pass
-
-            # 2. Try finding manually created transcript
-            if transcript is None:
-                try:
-                    transcript = tx_list.find_manually_created_transcript(PREFERRED_LANGS)
-                except Exception:
-                    pass
-
-            # 3. Try finding auto-generated transcript
-            if transcript is None:
-                try:
-                    transcript = tx_list.find_generated_transcript(PREFERRED_LANGS)
-                except Exception:
-                    pass
-
-            # 4. Fallback: pick the first available transcript of ANY language
-            if transcript is None:
-                for t in tx_list:
-                    transcript = t
-                    break
-
-            if transcript is None:
-                raise ValueError("No transcript is available for this video.")
-
-            used_lang = getattr(transcript, "language_code", getattr(transcript, "language", "unknown"))
-            logger.info(
-                "Fetching YouTube transcript: video=%s lang=%s generated=%s",
-                video_id,
-                used_lang,
-                getattr(transcript, "is_generated", "?"),
-            )
-            segments = transcript.fetch()
-
-        except TranscriptsDisabled:
-            raise ValueError("This video has transcripts disabled. Only videos with captions can be added.")
-        except NoTranscriptFound:
-            raise ValueError("No transcript was found for this video.")
-        except (VideoUnavailable, VideoUnplayable):
-            raise ValueError("This video is unavailable or private.")
-        except CouldNotRetrieveTranscript as e:
-            raise ValueError(f"Could not retrieve transcript: {e}")
-        except ValueError:
-            raise
-        except Exception as fetch_err:
-            logger.warning("Listing transcripts failed (%s), trying direct fetch shortcut", fetch_err)
-            try:
-                segments = ytt.fetch(video_id, languages=PREFERRED_LANGS)
-                used_lang = "auto"
-            except Exception as fallback_err:
-                raise ValueError(
-                    f"Could not fetch transcript for this video ({fallback_err}). "
-                    "The video may be age-restricted, region-locked, or have no captions."
-                ) from fallback_err
-
-        if not segments:
-            raise ValueError("The transcript was empty.")
-
-        # Merge segments into ~120-second paragraph blocks for better retrieval context and quota efficiency.
-        paragraphs: list[dict] = []
-        current_text: list[str] = []
-        current_start = 0.0
-        block_duration = 120.0
-
-        for seg in segments:
-            if isinstance(seg, dict):
-                raw_text = seg.get("text", "")
-                start = float(seg.get("start", 0))
-            else:
-                raw_text = getattr(seg, "text", "")
-                start = float(getattr(seg, "start", 0))
-
-            text = raw_text.strip().replace("\n", " ")
-            if not text:
-                continue
-            if not current_text:
-                current_start = start
-            current_text.append(text)
-            if start - current_start >= block_duration:
-                paragraphs.append({"text": " ".join(current_text), "page_number": len(paragraphs) + 1})
-                current_text = []
-
-        if current_text:
-            paragraphs.append({"text": " ".join(current_text), "page_number": len(paragraphs) + 1})
-
-        if not paragraphs:
-            raise ValueError("The transcript was empty or could not be parsed.")
-
-        chunks = chunk_text(paragraphs)
-        if not chunks:
-            raise ValueError("The transcript was too short to index.")
-
-        embedded_chunks = embed_chunks(chunks)
-        db.insert_chunks(document_id, embedded_chunks)
-        db.update_document_status(
-            document_id, "ready", page_count=len(paragraphs), chunk_count=len(embedded_chunks)
-        )
-        logger.info(
-            "YouTube ingestion done: video=%s lang=%s paragraphs=%d chunks=%d",
-            video_id, used_lang, len(paragraphs), len(embedded_chunks),
-        )
+        ingest_youtube_or_raise(url, document_id)
     except Exception as exc:
         logger.exception("YouTube ingestion failed for document %s", document_id)
         db.update_document_status(document_id, "failed", error_message=str(exc)[:500])
-

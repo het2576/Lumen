@@ -1,0 +1,120 @@
+{
+  "cases": 43,
+  "errors": 0,
+  "pass_rate": 0.9069767441860465,
+  "hit@1": 0.9130434782608695,
+  "hit@3": 1.0,
+  "hit@5": 1.0,
+  "mrr": 0.9565217391304348,
+  "context_recall": 1.0,
+  "doc_coverage": 1.0,
+  "route_accuracy": 0.9534883720930233,
+  "false_refusal_rate": 0.0,
+  "hallucination_rate": 0.0,
+  "exact_refusal_phrase_rate": 1.0,
+  "must_include_rate": 1.0,
+  "must_not_include_rate": 0.6666666666666666,
+  "number_accuracy": 0.5,
+  "uncited_rate": 0.0,
+  "judge_faithfulness": 1.0,
+  "judge_relevance": 1.0,
+  "judge_correctness": 1.0,
+  "judged_cases": 9,
+  "latency_p50_ms": 13798,
+  "latency_p95_ms": 26004,
+  "retrieve_p50_ms": 752,
+  "generate_p50_ms": 10471,
+  "db_calls_mean": 7.186046511627907,
+  "input_tokens_mean": 1252.046511627907,
+  "output_tokens_mean": 94.74418604651163,
+  "cached_tokens_mean": 0.0,
+  "context_tokens_mean": 635.4651162790698,
+  "by_category": {
+    "broad": {
+      "n": 3,
+      "pass_rate": 1.0,
+      "hit@3": null,
+      "latency_p50_ms": 13461
+    },
+    "drafting": {
+      "n": 2,
+      "pass_rate": 1.0,
+      "hit@3": null,
+      "latency_p50_ms": 5772
+    },
+    "exact_term": {
+      "n": 2,
+      "pass_rate": 1.0,
+      "hit@3": 1.0,
+      "latency_p50_ms": 13799
+    },
+    "follow_up": {
+      "n": 3,
+      "pass_rate": 1.0,
+      "hit@3": 1.0,
+      "latency_p50_ms": 9572
+    },
+    "injection": {
+      "n": 2,
+      "pass_rate": 0.5,
+      "hit@3": 1.0,
+      "latency_p50_ms": 4021
+    },
+    "lookup": {
+      "n": 6,
+      "pass_rate": 1.0,
+      "hit@3": 1.0,
+      "latency_p50_ms": 21406
+    },
+    "multi_doc": {
+      "n": 4,
+      "pass_rate": 0.75,
+      "hit@3": 1.0,
+      "latency_p50_ms": 10192
+    },
+    "multi_hop": {
+      "n": 2,
+      "pass_rate": 1.0,
+      "hit@3": 1.0,
+      "latency_p50_ms": 16239
+    },
+    "near_miss": {
+      "n": 3,
+      "pass_rate": 1.0,
+      "hit@3": null,
+      "latency_p50_ms": 8574
+    },
+    "numeric": {
+      "n": 7,
+      "pass_rate": 0.7142857142857143,
+      "hit@3": null,
+      "latency_p50_ms": 2671
+    },
+    "paraphrase": {
+      "n": 3,
+      "pass_rate": 1.0,
+      "hit@3": 1.0,
+      "latency_p50_ms": 20043
+    },
+    "routing_trap": {
+      "n": 2,
+      "pass_rate": 1.0,
+      "hit@3": 1.0,
+      "latency_p50_ms": 12494
+    },
+    "unanswerable": {
+      "n": 4,
+      "pass_rate": 1.0,
+      "hit@3": null,
+      "latency_p50_ms": 4545
+    }
+  },
+  "meta": {
+    "run_id": "20261029-233549-baseline",
+    "dataset": "evals/datasets/golden.jsonl",
+    "context_mode": "production",
+    "generation_model": "gemini-flash-lite-latest",
+    "judge_model": "gemini-3.6-flash",
+    "git": "15d689d+uncommitted"
+  }
+}

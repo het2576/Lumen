@@ -152,6 +152,7 @@ button { -webkit-tap-highlight-color: transparent; }
 .typing { display: inline-flex; align-items: center; gap: 5px; height: 24px; }
 .typing i { width: 5px; height: 5px; border-radius: 50%; background: var(--signal); animation: dots 1.05s infinite ease-in-out; }
 .typing i:nth-child(2) { animation-delay: .13s; }.typing i:nth-child(3) { animation-delay: .26s; }
+.answer-forming { display: flex; align-items: center; gap: 10px; color: var(--muted); font-family: var(--font-geist-mono), monospace; font-size: 11px; }
 .response-actions { display: flex; align-items: center; gap: 9px; margin-top: 13px; color: var(--quiet); font-family: var(--font-geist-mono), monospace; font-size: 9px; }.response-action { display: inline-flex; align-items: center; gap: 5px; border: 0; padding: 2px 0; color: inherit; background: transparent; font: inherit; cursor: pointer; transition: color .16s ease; }.response-action:hover { color: var(--signal); }.response-divider { width: 1px; height: 11px; background: var(--line); }.response-status { display: inline-flex; align-items: center; gap: 5px; }.response-status i { width: 5px; height: 5px; border-radius: 50%; background: var(--signal); }
 .response-status.is-caution { color: #f2ca77; }.response-status.is-caution i { background: #f2ca77; }
 

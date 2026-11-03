@@ -13,13 +13,8 @@ from collections import deque
 
 import tiktoken
 
-from app.config import (
-    EMBED_BATCH_TOKENS,
-    EMBED_TPM_BUDGET,
-    EMBEDDING_DIM,
-    EMBEDDING_MODEL,
-)
-from app.services.gemini_client import get_genai
+from app.config import EMBED_BATCH_TOKENS, EMBED_TPM_BUDGET
+from app.services import gemini_client
 
 logger = logging.getLogger(__name__)
 
@@ -94,31 +89,22 @@ def _build_batches(texts: list[str]) -> list[tuple[list[str], int]]:
 
 
 def _embed_batch(batch: list[str], tokens: int, task_type: str) -> list[list[float]]:
-    genai = get_genai()
     for attempt in range(5):
         _budget.reserve(tokens)
         try:
-            result = genai.embed_content(
-                model=EMBEDDING_MODEL,
-                content=batch,
-                task_type=task_type,
-                output_dimensionality=EMBEDDING_DIM,
-            )
-            vectors = result["embedding"]
-            # A one-item batch can come back as a bare vector rather than nested.
-            return [vectors] if vectors and isinstance(vectors[0], float) else vectors
+            return gemini_client.embed(batch, task_type=task_type)
         except Exception as exc:
-            message = str(exc)
-            throttled = "429" in message or "quota" in message.lower() or "resourceexhausted" in message.lower()
-            if not throttled or attempt == 4:
+            if not gemini_client.is_transient(exc) or attempt == 4:
                 raise
-            wait = 8.0 + attempt * 6.0
+            message = str(exc)
+            # A 429 means the per-minute quota is spent: wait long enough for it to refill.
+            wait = (8.0 + attempt * 6.0) if gemini_client.is_rate_limited(exc) else (1.0 + attempt * 2.0)
             match = re.search(r"retry in ([\d.]+)s", message)
             if match:
                 wait = max(float(match.group(1)) + 1.0, wait)
-            logger.warning("Embedding throttled — retrying in %.1fs (attempt %d)", wait, attempt + 1)
+            logger.warning("Embedding failed transiently (%s) — retrying in %.1fs (attempt %d)", message[:80], wait, attempt + 1)
             time.sleep(wait)
-    raise RuntimeError("Embedding failed after repeated rate limiting.")
+    raise RuntimeError("Embedding failed after repeated retries.")
 
 
 def embed_texts(texts: list[str], *, task_type: str) -> list[list[float]]:

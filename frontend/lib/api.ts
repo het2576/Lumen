@@ -88,6 +88,58 @@ export async function sendChatMessage(params: {
   return handle(res);
 }
 
+type StreamEvent =
+  | { type: "meta"; conversation_id: string }
+  | { type: "delta"; text: string }
+  | ({ type: "done" } & ChatResponse)
+  | { type: "error"; detail: string };
+
+/**
+ * Ask a question and receive the answer as it is written (Server-Sent Events over a POST;
+ * EventSource can't send a body or auth header, so the stream is read by hand).
+ * onDelta gets each new piece of text; the promise resolves with the final response.
+ */
+export async function streamChatMessage(
+  params: { question: string; documentId: string; documentIds?: string[]; conversationId?: string },
+  handlers: { onMeta?: (conversationId: string) => void; onDelta?: (text: string) => void } = {},
+): Promise<ChatResponse> {
+  const res = await fetch(`${API_URL}/chat/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "text/event-stream", ...(await authHeaders()) },
+    body: JSON.stringify({
+      document_id: params.documentId,
+      document_ids: params.documentIds,
+      conversation_id: params.conversationId,
+      question: params.question,
+    }),
+  });
+  if (!res.ok || !res.body) return handle(res);
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let final: ChatResponse | undefined;
+  for (;;) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done });
+    // Events are separated by a blank line; keep any incomplete tail for the next read.
+    const blocks = buffer.split("\n\n");
+    buffer = done ? "" : blocks.pop() ?? "";
+    for (const block of blocks) {
+      const data = block.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
+      if (!data) continue;
+      const event = JSON.parse(data) as StreamEvent;
+      if (event.type === "meta") handlers.onMeta?.(event.conversation_id);
+      else if (event.type === "delta") handlers.onDelta?.(event.text);
+      else if (event.type === "error") throw new ApiError(event.detail);
+      else if (event.type === "done") final = event;
+    }
+    if (done) break;
+  }
+  if (!final) throw new ApiError("The answer was interrupted. Please try again.");
+  return final;
+}
+
 export async function getConversationMessages(conversationId: string): Promise<ConversationHistory> {
   const res = await fetch(`${API_URL}/chat/${conversationId}/messages`, { headers: await authHeaders() });
   return handle(res);

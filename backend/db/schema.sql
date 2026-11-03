@@ -51,6 +51,63 @@ create table if not exists document_tables (
 create index if not exists document_tables_document_id_idx
   on document_tables (document_id);
 
+-- An earlier Lumen version created document_tables with a different shape (sheet_name,
+-- section_hint, JSON stored as text). `create table if not exists` leaves that table untouched,
+-- so bring it up to date here. Every step is idempotent and safe to re-run.
+alter table document_tables add column if not exists table_name text;
+alter table document_tables add column if not exists inferred_types jsonb not null default '{}'::jsonb;
+alter table document_tables add column if not exists source_kind text not null default 'spreadsheet';
+alter table document_tables add column if not exists verified boolean not null default true;
+
+do $$
+declare
+  json_column text;
+  legacy_column text;
+begin
+  foreach json_column in array array['column_headers', 'row_data'] loop
+    if exists (
+      select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'document_tables'
+        and column_name = json_column and data_type in ('text', 'character varying')
+    ) then
+      execute format('alter table document_tables alter column %I drop default', json_column);
+      execute format('alter table document_tables alter column %I type jsonb using %I::jsonb', json_column, json_column);
+      execute format('alter table document_tables alter column %I set default ''[]''::jsonb', json_column);
+    end if;
+  end loop;
+
+  if (
+    select count(*) from information_schema.columns
+    where table_schema = 'public' and table_name = 'document_tables'
+      and column_name in ('sheet_name', 'table_index')
+  ) = 2 then
+    execute $sql$
+      update document_tables
+      set table_name = coalesce(
+        sheet_name,
+        case when page_number is not null
+          then 'Page ' || page_number || ' · Table ' || (coalesce(table_index, 0) + 1) end,
+        'Table'
+      )
+      where table_name is null
+    $sql$;
+  end if;
+
+  -- Legacy columns the current code no longer writes must not block new inserts.
+  foreach legacy_column in array array['sheet_name', 'table_index', 'section_hint', 'row_count', 'source'] loop
+    if exists (
+      select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'document_tables'
+        and column_name = legacy_column and is_nullable = 'NO'
+    ) then
+      execute format('alter table document_tables alter column %I drop not null', legacy_column);
+    end if;
+  end loop;
+end $$;
+
+update document_tables set table_name = 'Table' where table_name is null;
+alter table document_tables alter column table_name set not null;
+
 create index if not exists document_chunks_embedding_idx
   on document_chunks using ivfflat (embedding vector_cosine_ops) with (lists = 100);
 
@@ -235,3 +292,51 @@ as $$
   order by rank desc
   limit match_count;
 $$;
+
+-- Durable ingestion queue. Uploads used to be processed by an in-process background task:
+-- a restart or deploy mid-ingestion lost the job and left the document stuck "processing".
+-- Now the API stores the file in Storage and inserts a row here; a worker claims rows with
+-- claim_ingestion_job (FOR UPDATE SKIP LOCKED, so several workers never take the same job),
+-- heartbeats locked_at while it works, and a job whose heartbeat stops is claimed again.
+create table if not exists ingestion_jobs (
+  id uuid primary key default gen_random_uuid(),
+  document_id uuid not null references documents(id) on delete cascade,
+  kind text not null check (kind in ('file', 'webpage', 'youtube')),
+  payload jsonb not null default '{}'::jsonb, -- {storage_path, filename} or {url}
+  status text not null default 'queued', -- queued | running | done | failed
+  attempts int not null default 0,
+  last_error text,
+  run_after timestamptz not null default now(), -- retry backoff
+  locked_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists ingestion_jobs_pending_idx
+  on ingestion_jobs (created_at) where status in ('queued', 'running');
+create index if not exists ingestion_jobs_document_id_idx
+  on ingestion_jobs (document_id);
+
+alter table ingestion_jobs enable row level security; -- backend-only table: no policies
+
+create or replace function claim_ingestion_job(p_stale_seconds int default 120)
+returns setof ingestion_jobs
+language sql
+as $$
+  update ingestion_jobs
+  set status = 'running', attempts = attempts + 1, locked_at = now(), updated_at = now()
+  where id = (
+    select id from ingestion_jobs
+    where (status = 'queued' and run_after <= now())
+       or (status = 'running' and locked_at < now() - make_interval(secs => p_stale_seconds))
+    order by created_at
+    for update skip locked
+    limit 1
+  )
+  returning *;
+$$;
+
+-- Private bucket for uploaded files waiting to be ingested (deleted once processed).
+insert into storage.buckets (id, name, public)
+values ('lumen-uploads', 'lumen-uploads', false)
+on conflict (id) do nothing;

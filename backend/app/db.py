@@ -1,8 +1,10 @@
+import json
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from supabase import Client, create_client
 
-from app.config import SUPABASE_KEY, SUPABASE_URL
+from app.config import SUPABASE_KEY, SUPABASE_URL, UPLOAD_BUCKET
 
 _client: Optional[Client] = None
 
@@ -115,10 +117,29 @@ def insert_document_tables(document_id: str, tables: list[dict]) -> None:
         get_client().table("document_tables").insert(rows[i : i + 50]).execute()
 
 
+def _normalize_table(row: dict) -> dict:
+    """Tables saved by earlier Lumen versions store JSON as text and have no table_name."""
+    table = dict(row)
+    for key, empty in (("column_headers", []), ("row_data", []), ("inferred_types", {})):
+        value = table.get(key)
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except ValueError:
+                value = empty
+        table[key] = value if value is not None else empty
+    if not table.get("table_name"):
+        page = table.get("page_number")
+        table["table_name"] = table.get("sheet_name") or (
+            f"Page {page} · Table {(table.get('table_index') or 0) + 1}" if page else "Table"
+        )
+    return table
+
+
 def get_document_tables(document_ids: list[str]) -> list[dict]:
     if not document_ids:
         return []
-    return (
+    rows = (
         get_client()
         .table("document_tables")
         .select("*")
@@ -127,6 +148,7 @@ def get_document_tables(document_ids: list[str]) -> list[dict]:
         .execute()
         .data
     )
+    return [_normalize_table(row) for row in rows]
 
 
 def get_document_chunks(document_id: str) -> list[dict]:
@@ -196,6 +218,18 @@ def save_message(
     return res.data[0]["id"]
 
 
+def save_turn(conversation_id: str, question: str, answer: str, source_chunk_ids: Optional[list[str]] = None) -> None:
+    """Store a question and its answer in one round trip. Explicit timestamps keep the pair
+    in order: rows inserted by one statement would otherwise share the same now()."""
+    asked_at = datetime.now(timezone.utc)
+    get_client().table("messages").insert([
+        {"conversation_id": conversation_id, "role": "user", "content": question,
+         "source_chunk_ids": [], "created_at": asked_at.isoformat()},
+        {"conversation_id": conversation_id, "role": "assistant", "content": answer,
+         "source_chunk_ids": source_chunk_ids or [], "created_at": (asked_at + timedelta(milliseconds=1)).isoformat()},
+    ]).execute()
+
+
 def get_conversation_history(conversation_id: str, limit: int = 10) -> list[dict]:
     res = (
         get_client()
@@ -254,3 +288,62 @@ def get_stats(user_id: str) -> dict:
         "total_queries": queries.count or 0,
         "avg_similarity_last_10": avg_similarity_last_10,
     }
+
+
+# --- Ingestion queue -------------------------------------------------------------------
+
+def enqueue_ingestion(document_id: str, kind: str, payload: dict) -> str:
+    res = get_client().table("ingestion_jobs").insert(
+        {"document_id": document_id, "kind": kind, "payload": payload}
+    ).execute()
+    return res.data[0]["id"]
+
+
+def claim_ingestion_job(stale_seconds: int) -> Optional[dict]:
+    """Atomically take the oldest runnable job (or one whose worker stopped heartbeating)."""
+    rows = get_client().rpc("claim_ingestion_job", {"p_stale_seconds": stale_seconds}).execute().data
+    return rows[0] if rows else None
+
+
+def heartbeat_ingestion_job(job_id: str) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    get_client().table("ingestion_jobs").update({"locked_at": now, "updated_at": now}).eq("id", job_id).eq("status", "running").execute()
+
+
+def finish_ingestion_job(job_id: str, status: str, error: Optional[str] = None) -> None:
+    get_client().table("ingestion_jobs").update({
+        "status": status, "last_error": error, "locked_at": None,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", job_id).execute()
+
+
+def retry_ingestion_job(job_id: str, error: str, delay_seconds: float) -> None:
+    now = datetime.now(timezone.utc)
+    get_client().table("ingestion_jobs").update({
+        "status": "queued", "last_error": error, "locked_at": None, "updated_at": now.isoformat(),
+        "run_after": (now + timedelta(seconds=delay_seconds)).isoformat(),
+    }).eq("id", job_id).execute()
+
+
+def clear_document_content(document_id: str) -> None:
+    """Remove partial output of an interrupted attempt so a retry never duplicates chunks."""
+    client = get_client()
+    client.table("document_chunks").delete().eq("document_id", document_id).execute()
+    client.table("document_tables").delete().eq("document_id", document_id).execute()
+
+
+def upload_source_file(path: str, contents: bytes, content_type: str) -> None:
+    get_client().storage.from_(UPLOAD_BUCKET).upload(path, contents, {"content-type": content_type, "upsert": "true"})
+
+
+def download_source_file(path: str) -> bytes:
+    return get_client().storage.from_(UPLOAD_BUCKET).download(path)
+
+
+def remove_source_file(path: str) -> None:
+    get_client().storage.from_(UPLOAD_BUCKET).remove([path])
+
+
+def pending_source_files(document_id: str) -> list[str]:
+    rows = get_client().table("ingestion_jobs").select("payload").eq("document_id", document_id).execute().data
+    return [row["payload"]["storage_path"] for row in rows if (row.get("payload") or {}).get("storage_path")]

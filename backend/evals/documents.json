@@ -1,0 +1,7 @@
+{
+  "member_agreement": "fixtures/member_agreement.pdf",
+  "q2_report": "fixtures/q2_report.pdf",
+  "q3_report": "fixtures/q3_report.pdf",
+  "vendor_faq": "fixtures/vendor_faq.pdf",
+  "sales": "fixtures/sales.csv"
+}

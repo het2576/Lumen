@@ -1,14 +1,36 @@
+import logging
+import os
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-import logging
-from app.config import CORS_ORIGINS
+
+from app import tracing
+from app.config import CORS_ORIGINS, INGESTION_WORKER_ENABLED
 from app.db import get_client
 from app.routers import chat, documents, stats
+from app.worker import WORKER
+
+# Without this, every app logger.info (trace lines, ingestion progress) is silently dropped:
+# uvicorn configures only its own loggers.
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)  # one line per Supabase/Gemini request is noise
+logging.getLogger("google_genai").setLevel(logging.WARNING)  # logs "AFC is enabled" on every call
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="DocQuery API")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    if INGESTION_WORKER_ENABLED:
+        WORKER.start()
+    yield
+    WORKER.stop()
+    tracing.flush()
+
+
+app = FastAPI(title="DocQuery API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,

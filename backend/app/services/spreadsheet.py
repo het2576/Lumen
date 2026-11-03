@@ -10,13 +10,13 @@ from typing import Any
 
 import pandas as pd
 
-from app.config import GENERATION_MODEL
-from app.services.gemini_client import get_genai
+from app import tracing
+from app.services import gemini_client
 
 logger = logging.getLogger(__name__)
 
 _TABULAR_KEYWORDS = {
-    "average", "avg", "mean", "sum", "total", "count", "max", "maximum", "min", "minimum",
+    "average", "avg", "sum", "total", "count", "max", "maximum", "min", "minimum",
     "median", "variance", "percent", "percentage", "rows where", "filter", "greater than", "less than",
     "highest", "lowest", "column", "sheet", "table", "spreadsheet", "csv", "xlsx", "chart", "trend",
     "compare", "difference", "increase", "decrease",
@@ -24,23 +24,59 @@ _TABULAR_KEYWORDS = {
 _ACTIONS = {"aggregate", "rows", "top", "chart", "compare"}
 _AGGREGATES = {"sum", "mean", "median", "min", "max", "count"}
 _OPERATORS = {"eq", "ne", "gt", "gte", "lt", "lte", "contains"}
+_NUMBER_NOISE = re.compile(r"[,$€£₹%]")
+
+
+def to_number(series: pd.Series) -> pd.Series:
+    """Parse numbers as reports print them: '251,500', '$1,450', '12%', and '(3,200)' as negative.
+
+    Plain pd.to_numeric rejects thousands separators, so PDF-table columns came back
+    all-NaN and verified answers silently fell through to LLM-read text.
+    """
+    text = series.astype(str).str.strip()
+    negative = text.str.match(r"^\(.*\)$")
+    numbers = pd.to_numeric(text.str.strip("()").str.replace(_NUMBER_NOISE, "", regex=True).str.strip(), errors="coerce")
+    return numbers.where(~negative, -numbers)
+
+
+# Whole-word matching: plain substring checks sent "summarize" (sum), "minutes" (min)
+# and "account" (count) down the spreadsheet path.
+_TABULAR_PATTERN = re.compile(
+    r"\b(?:" + "|".join(re.escape(term) for term in sorted(_TABULAR_KEYWORDS, key=len, reverse=True)) + r")\b"
+)
 
 
 def is_tabular_question(question: str) -> bool:
-    return any(term in question.lower() for term in _TABULAR_KEYWORDS)
+    return bool(_TABULAR_PATTERN.search(question.lower()))
+
+
+def _sample_values(table: dict, per_column: int = 5) -> dict[str, list[str]]:
+    """A few real values per column, so the planner filters on values that exist instead of
+    inventing them from words in the question (e.g. filtering Location for "Q3")."""
+    samples: dict[str, list[str]] = {}
+    for column in table.get("column_headers") or []:
+        seen: list[str] = []
+        for row in table.get("row_data") or []:
+            value = str(row.get(column) or "").strip()[:40]
+            if value and value not in seen:
+                seen.append(value)
+                if len(seen) == per_column:
+                    break
+        samples[column] = seen
+    return samples
 
 
 def _metadata(tables: list[dict]) -> list[dict[str, Any]]:
-    return [{"id": table.get("id"), "name": table.get("table_name"), "document_id": table.get("document_id"), "columns": table.get("column_headers", [])} for table in tables]
+    return [{"id": table.get("id"), "name": table.get("table_name"), "document": table.get("document_name"), "document_id": table.get("document_id"), "columns": table.get("column_headers", []), "sample_values": _sample_values(table)} for table in tables]
 
 
-def _query_plan(question: str, tables: list[dict]) -> dict[str, Any] | None:
+def _query_plan(question: str, tables: list[dict], trace: tracing.Observation = tracing.NOOP) -> dict[str, Any] | None:
     prompt = f"""Turn this spreadsheet question into one JSON query plan. Do not calculate values.
 Available tables: {json.dumps(_metadata(tables))}
 Question: {question}
-Return only JSON: table_id, table_ids (optional array; required for compare), action (aggregate|rows|top|chart|compare), column (or null), aggregate (sum|mean|median|min|max|count or null), filters (array of {{column, operator: eq|ne|gt|gte|lt|lte|contains, value}}), sort_column (or null), descending (boolean), limit (1-25). For comparisons use compare and every relevant table ID. Use only exact IDs and columns shown. If impossible return {{"cannot_answer": true}}."""
+Return only JSON: table_id, table_ids (optional array; required for compare), action (aggregate|rows|top|chart|compare), column (or null), aggregate (sum|mean|median|min|max|count or null), filters (array of {{column, operator: eq|ne|gt|gte|lt|lte|contains, value}}), sort_column (or null), descending (boolean), limit (1-25). For comparisons use compare and every relevant table ID. Use only exact IDs and columns shown. Words that identify a table or document (a report, quarter, sheet or file name) choose table_id; never turn them into filters. Only add a filter when the question restricts rows, using a value like those in that column's sample_values. The column must measure exactly the quantity asked about: if the question asks about something no column holds (e.g. churn when there are only member counts), never substitute a related column. Return {{"cannot_answer": true}} instead, because a wrong verified answer is worse than none."""
     try:
-        text = (get_genai().GenerativeModel(GENERATION_MODEL).generate_content(prompt).text or "").strip()
+        text = gemini_client.generate_text(prompt, parent=trace, name="query_plan").strip()
         return json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", text).strip())
     except Exception:
         logger.exception("Structured query planning failed")
@@ -65,11 +101,11 @@ def _apply_filters(frame: pd.DataFrame, filters: list[dict]) -> pd.DataFrame:
         if column not in frame.columns or operator not in _OPERATORS:
             continue
         series = frame[column]
-        numeric = pd.to_numeric(series, errors="coerce")
+        numeric = to_number(series)
         if operator == "contains":
             frame = frame[series.astype(str).str.contains(str(value), case=False, na=False)]
         elif operator in {"gt", "gte", "lt", "lte"}:
-            expected = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+            expected = to_number(pd.Series([value])).iloc[0]
             if pd.notna(expected):
                 comparison = {"gt": numeric > expected, "gte": numeric >= expected, "lt": numeric < expected, "lte": numeric <= expected}[operator]
                 frame = frame[comparison]
@@ -86,10 +122,13 @@ def _markdown(frame: pd.DataFrame, limit: int) -> str:
     return "| " + " | ".join(headers) + " |\n| " + " | ".join("---" for _ in headers) + " |\n" + "\n".join("| " + " | ".join(row) + " |" for row in rows)
 
 
-def execute_structured_query(question: str, tables: list[dict]) -> dict[str, Any]:
+def execute_structured_query(question: str, tables: list[dict], trace: tracing.Observation = tracing.NOOP) -> dict[str, Any]:
     if not tables:
         return {"answer": "I couldn't find verified structured data for that request.", "success": False}
-    plan = _query_plan(question, tables) or _fallback_plan(question, tables) or {}
+    plan = _query_plan(question, tables, trace) or _fallback_plan(question, tables) or {}
+    # Compare plans often list only table_ids; the first one anchors column validation.
+    if not plan.get("table_id") and plan.get("table_ids"):
+        plan["table_id"] = plan["table_ids"][0]
     table = next((candidate for candidate in tables if str(candidate.get("id")) == str(plan.get("table_id"))), None)
     if plan.get("cannot_answer") or not table or plan.get("action") not in _ACTIONS:
         return {"answer": "I couldn't match that request to a verified table or column.", "success": False}
@@ -111,7 +150,7 @@ def execute_structured_query(question: str, tables: list[dict]) -> dict[str, Any
             if column not in (candidate.get("column_headers") or []):
                 continue
             candidate_frame = _apply_filters(pd.DataFrame(candidate.get("row_data") or [], columns=candidate.get("column_headers") or []), plan.get("filters") or [])
-            values = pd.to_numeric(candidate_frame[column], errors="coerce").dropna()
+            values = to_number(candidate_frame[column]).dropna()
             if values.empty:
                 continue
             value = int(values.notna().sum()) if aggregate == "count" else getattr(values, aggregate)()
@@ -128,7 +167,7 @@ def execute_structured_query(question: str, tables: list[dict]) -> dict[str, Any
         elif not column:
             return {"answer": "Choose a column to calculate that value from.", "success": False}
         else:
-            values = pd.to_numeric(frame[column], errors="coerce").dropna()
+            values = to_number(frame[column]).dropna()
             if values.empty:
                 return {"answer": f"{column} does not contain enough numeric values for a verified {aggregate}.", "success": False}
             value = getattr(values, aggregate)()
@@ -138,12 +177,16 @@ def execute_structured_query(question: str, tables: list[dict]) -> dict[str, Any
 
     sort_column = plan.get("sort_column") if plan.get("sort_column") in frame.columns else column
     if sort_column:
-        frame = frame.assign(__sort=pd.to_numeric(frame[sort_column], errors="coerce")).sort_values("__sort", ascending=not bool(plan.get("descending", True)), na_position="last").drop(columns="__sort")
+        frame = frame.assign(__sort=to_number(frame[sort_column])).sort_values("__sort", ascending=not bool(plan.get("descending", True)), na_position="last").drop(columns="__sort")
     chart = None
     if action == "chart" and column:
-        values = pd.to_numeric(frame[column], errors="coerce")
+        values = to_number(frame[column])
         label_column = next((candidate for candidate in frame.columns if candidate != column), None)
         points = [{"label": str(frame.loc[index, label_column]) if label_column else str(index + 1), "value": float(value)} for index, value in values.items() if pd.notna(value)][:25]
         if points:
             chart = {"type": "line" if len(points) > 2 else "bar", "title": f"{column} · verified data", "data": points}
-    return {"answer": "Here are the verified rows from the structured data:\n\n" + _markdown(frame, plan.get("limit", 10)), "success": True, "table": table, "verification": "verified", "chart": chart}
+    # Always state the match count: "how many rows…" questions are answered by it, and a
+    # truncated table alone doesn't say how many rows exist.
+    shown = min(len(frame), max(1, min(int(plan.get("limit") or 10), 25)))
+    count = f"**{len(frame)}** matching row{'s' if len(frame) != 1 else ''}" + (f" (showing the first {shown})" if shown < len(frame) else "")
+    return {"answer": f"Verified result: {count} in the structured data.\n\n" + _markdown(frame, plan.get("limit", 10)), "success": True, "table": table, "verification": "verified", "chart": chart}

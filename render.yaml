@@ -19,3 +19,10 @@ services:
         sync: false
       - key: CORS_ORIGINS
         sync: false
+      # Optional: tracing. Leave unset to trace to logs only.
+      - key: LANGFUSE_PUBLIC_KEY
+        sync: false
+      - key: LANGFUSE_SECRET_KEY
+        sync: false
+      - key: LANGFUSE_BASE_URL
+        sync: false

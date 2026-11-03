@@ -105,8 +105,18 @@ function parseMarkdownLines(text: string): React.ReactNode[] {
   return nodes;
 }
 
-export default function AnswerContent({ content }: { content: string }) {
-  const segments = splitCodeBlocks(content);
+/** While an answer streams, a code fence can be open: hold that block back until it closes,
+ *  so a half-written chart never flashes up as raw JSON. */
+function splitOpenFence(content: string): { settled: string; openLang?: string } {
+  const fences = Array.from(content.matchAll(/^```(\w*)/gm));
+  if (fences.length % 2 === 0) return { settled: content };
+  const open = fences[fences.length - 1];
+  return { settled: content.slice(0, open.index), openLang: open[1].toLowerCase() };
+}
+
+export default function AnswerContent({ content, streaming = false }: { content: string; streaming?: boolean }) {
+  const { settled, openLang } = streaming ? splitOpenFence(content) : { settled: content, openLang: undefined };
+  const segments = splitCodeBlocks(settled);
 
   return (
     <div className="answer-content">
@@ -137,6 +147,7 @@ export default function AnswerContent({ content }: { content: string }) {
 
         return <Fragment key={`text-${i}`}>{parseMarkdownLines(seg.raw)}</Fragment>;
       })}
+      {openLang !== undefined && <p className="answer-forming"><span className="typing" aria-hidden="true"><i/><i/><i/></span>{openLang === "chart" ? "Drawing chart…" : "Writing…"}</p>}
     </div>
   );
 }

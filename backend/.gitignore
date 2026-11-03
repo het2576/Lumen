@@ -5,3 +5,4 @@ venv/
 .venv/
 uploads/*
 !uploads/.gitkeep
+evals/results/

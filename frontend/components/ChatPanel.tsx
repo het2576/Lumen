@@ -1,14 +1,14 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ApiError, getConversationMessages, sendChatMessage } from "@/lib/api";
+import { ApiError, getConversationMessages, streamChatMessage } from "@/lib/api";
 import type { ChatMessage, Document } from "@/lib/types";
 import MessageBubble from "./MessageBubble";
 
 const prompts = [
-  ["01", "Give me the essential argument"],
-  ["02", "What should I pay closest attention to?"],
-  ["03", "Pull out the key decisions and risks"],
+  ["01", "Summarize the key points"],
+  ["02", "What are the most important details?"],
+  ["03", "List the key facts, numbers, and dates"],
   ["04", "Explain this as a concise briefing"],
 ];
 
@@ -64,7 +64,8 @@ export default function ChatPanel({ documents, onRemoveDocument, onOpenLibrary, 
     inputRef.current?.focus();
   }, [resetSignal, sessionKey]);
 
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+  // Follow streaming text instantly; a smooth scroll restarted on every piece would judder.
+  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: messages[messages.length - 1]?.streaming ? "auto" : "smooth" }); }, [messages]);
 
   async function handleSend(questionOverride?: string) {
     const question = (questionOverride ?? input).trim();
@@ -73,16 +74,28 @@ export default function ChatPanel({ documents, onRemoveDocument, onOpenLibrary, 
     const pendingMessage: ChatMessage = { id: crypto.randomUUID(), role: "assistant", content: "", pending: true };
     setMessages((previous) => [...previous, userMessage, pendingMessage]);
     setInput(""); setSending(true);
+    const rememberConversation = (id: string) => {
+      setConversationId(id);
+      window.localStorage.setItem(`lumen:conversation:${sessionKey}`, id);
+    };
     try {
-      const response = await sendChatMessage({ question, documentId: primaryDocument.id, documentIds, conversationId });
-      setConversationId(response.conversation_id);
-      window.localStorage.setItem(`lumen:conversation:${sessionKey}`, response.conversation_id);
+      const response = await streamChatMessage(
+        { question, documentId: primaryDocument.id, documentIds, conversationId },
+        {
+          // Known before the answer starts, so a follow-up stays in this conversation even if the answer fails.
+          onMeta: rememberConversation,
+          onDelta: (text) => setMessages((previous) => previous.map((message) => message.id === pendingMessage.id
+            ? { ...message, content: message.content + text, pending: false, streaming: true }
+            : message)),
+        },
+      );
+      rememberConversation(response.conversation_id);
       setMessages((previous) => previous.map((message) => message.id === pendingMessage.id
-        ? { ...message, content: response.answer, sources: response.sources, verification: response.verification, chart: response.chart, pending: false }
+        ? { ...message, content: response.answer, sources: response.sources, verification: response.verification, chart: response.chart, pending: false, streaming: false }
         : message));
     } catch (cause) {
       const message = cause instanceof ApiError ? cause.message : "We couldn't reach your workspace. Check that the API is running, then try again.";
-      setMessages((previous) => previous.map((item) => item.id === pendingMessage.id ? { ...item, content: message, pending: false, error: true } : item));
+      setMessages((previous) => previous.map((item) => item.id === pendingMessage.id ? { ...item, content: message, pending: false, streaming: false, error: true } : item));
     } finally {
       setSending(false);
       inputRef.current?.focus();

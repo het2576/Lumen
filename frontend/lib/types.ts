@@ -32,6 +32,8 @@ export interface ChatMessage {
   verification?: "verified" | "inferred" | "text";
   chart?: Chart;
   pending?: boolean;
+  /** Text is arriving; sources and actions appear when it finishes. */
+  streaming?: boolean;
   error?: boolean;
   created_at?: string;
 }

@@ -1,22 +1,41 @@
-import os
+import logging
 from pathlib import Path
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from postgrest.exceptions import APIError
 
 from app import db
 from app.auth import get_current_user_id
 from app.models.schemas import DocumentOut, UploadResponse, UrlIngestRequest
-from app.services.ingestion import ingest_document, ingest_webpage, ingest_youtube, validate_public_url, _parse_youtube_id
+from app.services.ingestion import validate_public_url, _parse_youtube_id
+from app.worker import WORKER
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
-UPLOAD_DIR = Path(__file__).resolve().parent.parent.parent / "uploads"
-UPLOAD_DIR.mkdir(exist_ok=True)
-
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB
 ALLOWED_SUFFIXES = {".pdf", ".csv", ".xlsx"}
+CONTENT_TYPES = {
+    ".pdf": "application/pdf",
+    ".csv": "text/csv",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
+
+
+def _enqueue(document_id: str, kind: str, payload: dict) -> UploadResponse:
+    """Hand the source to the durable queue. If that fails, say so now rather than leaving
+    the document stuck in "processing"."""
+    try:
+        db.enqueue_ingestion(document_id, kind, payload)
+    except Exception as exc:
+        logger.exception("Could not queue ingestion for %s", document_id)
+        db.update_document_status(document_id, "failed", error_message="Lumen couldn't queue this source for processing. Please try again.")
+        raise HTTPException(status_code=503, detail="Lumen couldn't queue this source for processing. Please try again.") from exc
+    WORKER.wake()
+    return UploadResponse(document_id=document_id, status="processing")
 
 
 def _webpage_label(url: str) -> str:
@@ -40,7 +59,6 @@ def _youtube_label(url: str) -> str:
 
 @router.post("/upload", response_model=UploadResponse)
 async def upload_document(
-    background_tasks: BackgroundTasks,
     file: UploadFile,
     user_id: str = Depends(get_current_user_id),
 ):
@@ -54,28 +72,22 @@ async def upload_document(
     if not contents:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
-    document_id = db.create_document(file.filename, user_id)
-
-    dest_path = UPLOAD_DIR / f"{document_id}{suffix}"
-    with open(dest_path, "wb") as f:
-        f.write(contents)
-
-    def _run():
-        try:
-            ingest_document(str(dest_path), document_id)
-        finally:
-            if dest_path.exists():
-                os.remove(dest_path)
-
-    background_tasks.add_task(_run)
-
-    return UploadResponse(document_id=document_id, status="processing")
+    # Database and Storage calls block; keep them off the event loop.
+    document_id = await run_in_threadpool(db.create_document, file.filename, user_id)
+    # Durable storage, not local disk: the instance's disk is wiped on every restart.
+    storage_path = f"{user_id}/{document_id}{suffix}"
+    try:
+        await run_in_threadpool(db.upload_source_file, storage_path, contents, CONTENT_TYPES[suffix])
+    except Exception as exc:
+        logger.exception("Could not store upload for %s", document_id)
+        await run_in_threadpool(db.update_document_status, document_id, "failed", error_message="The file couldn't be stored. Please try again.")
+        raise HTTPException(status_code=503, detail="The file couldn't be stored. Please try again.") from exc
+    return await run_in_threadpool(_enqueue, document_id, "file", {"storage_path": storage_path, "filename": file.filename})
 
 
 @router.post("/url", response_model=UploadResponse)
 def add_url_source(
     payload: UrlIngestRequest,
-    background_tasks: BackgroundTasks,
     user_id: str = Depends(get_current_user_id),
 ):
     url_str = payload.url.strip()
@@ -85,22 +97,19 @@ def add_url_source(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         document_id = db.create_document(_youtube_label(url_str), user_id, source_url=url_str)
-        background_tasks.add_task(ingest_youtube, url_str, document_id)
-        return UploadResponse(document_id=document_id, status="processing")
+        return _enqueue(document_id, "youtube", {"url": url_str})
 
     try:
         url = validate_public_url(payload.url)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     document_id = db.create_document(_webpage_label(url), user_id, source_url=url)
-    background_tasks.add_task(ingest_webpage, url, document_id)
-    return UploadResponse(document_id=document_id, status="processing")
+    return _enqueue(document_id, "webpage", {"url": url})
 
 
 @router.post("/youtube", response_model=UploadResponse)
 def add_youtube_source(
     payload: UrlIngestRequest,
-    background_tasks: BackgroundTasks,
     user_id: str = Depends(get_current_user_id),
 ):
     url = payload.url.strip()
@@ -111,8 +120,7 @@ def add_youtube_source(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     document_id = db.create_document(_youtube_label(url), user_id, source_url=url)
-    background_tasks.add_task(ingest_youtube, url, document_id)
-    return UploadResponse(document_id=document_id, status="processing")
+    return _enqueue(document_id, "youtube", {"url": url})
 
 
 @router.get("/{document_id}/status", response_model=DocumentOut)
@@ -136,6 +144,12 @@ def delete_document(document_id: str, user_id: str = Depends(get_current_user_id
     doc = db.get_document(document_id, user_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found.")
+    # A source deleted before it was processed still has its upload in Storage.
+    try:
+        for storage_path in db.pending_source_files(document_id):
+            db.remove_source_file(storage_path)
+    except Exception:
+        logger.warning("Could not remove stored upload for %s", document_id, exc_info=True)
     try:
         db.delete_document(document_id, user_id)
     except APIError as e:
