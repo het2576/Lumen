@@ -12,7 +12,7 @@ Both run one pipeline, _answer(), which yields events:
 import json
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Iterator
 
@@ -32,6 +32,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 _STREAM_ERROR = "Lumen couldn't finish this answer. Please try again."
+# Runs a request's independent lookups (history, tables, question embedding) at the same time.
+_PREPARE_POOL = ThreadPoolExecutor(max_workers=16, thread_name_prefix="chat-prepare")
 
 
 @router.get("/{conversation_id}/messages", response_model=ConversationHistoryOut)
@@ -54,7 +56,8 @@ def _documents_for_request(request: ChatRequest, user_id: str) -> list[dict]:
     document_ids = list(dict.fromkeys(request.document_ids or [request.document_id]))
     if request.document_id not in document_ids:
         document_ids.insert(0, request.document_id)
-    documents = [db.get_document(document_id, user_id) for document_id in document_ids]
+    found = db.get_documents(document_ids, user_id)
+    documents = [found.get(document_id) for document_id in document_ids]
     if any(document is None for document in documents):
         raise HTTPException(status_code=404, detail="One or more documents were not found.")
     if any(document["status"] != "ready" for document in documents if document):
@@ -62,12 +65,14 @@ def _documents_for_request(request: ChatRequest, user_id: str) -> list[dict]:
     return [document for document in documents if document]
 
 
-def _gather_context(documents: list[dict], question: str, trace: tracing.Observation = tracing.NOOP) -> list[dict]:
+def _gather_context(documents: list[dict], question: str, trace: tracing.Observation = tracing.NOOP,
+                    embedding: Future | None = None) -> list[dict]:
     """Send small sources to the model whole so broad questions ("summarize", "key risks") see
-    everything; fall back to hybrid retrieval of the closest chunks for large sources."""
+    everything; fall back to hybrid retrieval of the closest chunks for large sources.
+    `embedding` is the question's embedding if _prepare already started computing it."""
     try:
         with trace.span("embed_query"):
-            query_embedding = embed_query(question)
+            query_embedding = embedding.result() if embedding is not None else embed_query(question)
     except Exception as exc:
         logger.warning("Query embedding unavailable (%s); using keyword search only", exc)
         query_embedding = None
@@ -111,28 +116,40 @@ class _Turn:
     conversation_id: str
     history: list[dict]
     tables: list[dict]
+    embedding: Future | None = None
 
 
 def _prepare(req: ChatRequest, user_id: str, trace: tracing.Trace) -> _Turn:
     """Validate the request and load its state. Runs before any response bytes are sent, so a
-    missing document or conversation is still a proper 404/409, even for the stream."""
+    missing document or conversation is still a proper 404/409, even for the stream.
+
+    Each lookup is a ~200 ms round trip, so after the ownership check everything independent
+    runs at once instead of one after another."""
     with trace.span("prepare"):
+        # Ownership first: nothing else is read until the user is known to own these documents.
         documents = _documents_for_request(req, user_id)
         document_ids = [document["id"] for document in documents]
+
+        tables_future = _PREPARE_POOL.submit(db.get_document_tables, document_ids)
+        # Text questions always need the question's embedding; start it now. Table questions
+        # usually don't, and fall back to embedding later if they end up on the text path.
+        embedding = None if is_tabular_question(req.question) else _PREPARE_POOL.submit(embed_query, req.question)
         if req.conversation_id:
-            conversation = db.get_conversation(req.conversation_id)
-            if not conversation or set(db.get_conversation_document_ids(req.conversation_id)) != set(document_ids):
+            history_future = _PREPARE_POOL.submit(db.get_conversation_history, req.conversation_id)
+            # Returns no ids for a conversation that doesn't exist, so this also checks existence.
+            if set(db.get_conversation_document_ids(req.conversation_id)) != set(document_ids):
                 raise HTTPException(status_code=404, detail="Conversation not found for these active sources.")
             conversation_id = req.conversation_id
+            history = history_future.result()
         else:
             conversation_id = db.create_conversation(document_ids)
+            history = []  # a brand-new conversation has no messages to load
 
-        history = db.get_conversation_history(conversation_id)
         document_by_id = {document["id"]: document for document in documents}
-        tables = [{**table, "document_name": document_by_id[table["document_id"]]["filename"]} for table in db.get_document_tables(document_ids)]
+        tables = [{**table, "document_name": document_by_id[table["document_id"]]["filename"]} for table in tables_future.result()]
     trace.session_id = conversation_id
     trace.set(conversation_id=conversation_id, documents=len(documents), history_messages=len(history))
-    return _Turn(req.question, req.document_id, documents, conversation_id, history, tables)
+    return _Turn(req.question, req.document_id, documents, conversation_id, history, tables, embedding)
 
 
 def _retry_once(action: str, fn, *args) -> None:
@@ -179,7 +196,7 @@ def _answer(turn: _Turn, trace: tracing.Trace) -> Iterator[dict]:
 
     trace.set(route="text")
     with trace.span("retrieve") as span:
-        chunks = _gather_context(turn.documents, turn.question, span)
+        chunks = _gather_context(turn.documents, turn.question, span, turn.embedding)
     trace.set(context_chunks=len(chunks))
 
     pieces: list[str] = []

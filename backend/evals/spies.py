@@ -15,7 +15,7 @@ from app.routers import chat as chat_module
 from app.services import gemini_client
 
 _DB_FUNCTIONS = (
-    "get_document", "get_conversation", "get_conversation_document_ids", "create_conversation",
+    "get_document", "get_documents", "get_conversation", "get_conversation_document_ids", "create_conversation",
     "get_conversation_history", "get_document_tables", "log_query", "save_turn",
 )
 _ORIGINAL_FULL_CONTEXT_MAX_CHUNKS = chat_module.FULL_CONTEXT_MAX_CHUNKS

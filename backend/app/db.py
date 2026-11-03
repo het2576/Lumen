@@ -61,6 +61,14 @@ def get_document(document_id: str, user_id: str) -> Optional[dict]:
     return res.data[0] if res.data else None
 
 
+def get_documents(document_ids: list[str], user_id: str) -> dict[str, dict]:
+    """Several of the user's documents in one round trip, keyed by id (missing ids are absent)."""
+    if not document_ids:
+        return {}
+    rows = get_client().table("documents").select("*").in_("id", document_ids).eq("user_id", user_id).execute().data
+    return {row["id"]: row for row in rows}
+
+
 def list_documents(user_id: str) -> list[dict]:
     res = (
         get_client()

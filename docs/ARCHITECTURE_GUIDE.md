@@ -1013,8 +1013,17 @@ What changed with streaming and the queue:
   **5.0 s** and the answer completed at 7.25 s. Before, all 7.25 s was dots.
 - **Writes are off the critical path.** The turn is saved in one insert *after* the `done` event,
   and a failed write is logged and retried once. It can no longer turn a finished answer into an error.
-- **The biggest remaining cost is `prepare`, about 2.1 s of serial DB round trips.** That's the
-  next target: fixes 5 and 8 below, plus region co-location.
+- **`prepare` now runs its lookups in parallel** (fixes 5 and 8 below). After the ownership check,
+  tables, history and the question's embedding are fetched at the same time. A new conversation skips
+  the history query, and a redundant `get_conversation` call is gone. Measured on the same requests:
+
+  | | Before | After |
+  |---|---|---|
+  | First question: `prepare` / first text | 2,262 / 4,327 ms | 1,175 / 2,555 ms |
+  | Follow-up: `prepare` / first text | 2,151 / 3,767 ms | 750 / 1,784 ms |
+
+  What's left in `prepare` is the ownership check followed by creating the conversation (two
+  dependent inserts). The next wins are fix 4 (verify JWTs locally) and region co-location.
 
 Two multipliers make it worse:
 - **Region distance.** Render runs in `oregon` ([render.yaml](../render.yaml)). If your Supabase
@@ -1037,10 +1046,10 @@ Two multipliers make it worse:
 | 2 | **Co-locate** Render and Supabase regions; use a paid always-on instance for real users | 100s of ms per request; removes 30-60 s cold starts | Low |
 | 3 | **Separate rate budget for queries.** Don't let ingestion's `_TokenBudget` block chat-time `embed_query` | Up to 60 s worst case → ~0 | Low |
 | 4 | **Verify JWT locally** (Supabase JWT secret/JWKS, `PyJWT`) instead of `auth.get_user()` network call per request | One round trip on *every* endpoint | Low |
-| 5 | **Parallelize independent work.** `embed_query` doesn't depend on history/tables; semantic and keyword RPCs don't depend on each other. Run them concurrently (threads or `asyncio.gather`) | Several round trips | Low-Med |
+| 5 | ✅ **Done for `prepare`.** **Parallelize independent work.** `embed_query` doesn't depend on history/tables; semantic and keyword RPCs don't depend on each other. Run them concurrently (threads or `asyncio.gather`) | Several round trips | Low-Med |
 | 6 | ✅ **Done.** **Move writes off the critical path.** `save_turn` (one insert for both messages) and `log_query` now run after the `done` event | 3 round trips → 0 on the critical path | Low |
 | 7 | **One hybrid-search RPC.** Do semantic + keyword + RRF fusion *inside one SQL function* (a CTE per retriever, then fuse) | 1 round trip, and fusion in DB | Medium |
-| 8 | **Fetch documents in one query** (`.in_("id", ids)`) instead of N `get_document` calls | N-1 round trips | Low |
+| 8 | ✅ **Done.** **Fetch documents in one query** (`.in_("id", ids)`) instead of N `get_document` calls | N-1 round trips | Low |
 | 9 | **Cache query embeddings** (in-memory LRU keyed by normalized question). The 4 starter prompt cards are asked constantly | ~150-300 ms on repeats | Low |
 | 10 | **Cap output** (`max_output_tokens`) and **trim history** (summarize old turns) | Generation time scales with output tokens | Low |
 | 11 | **Semantic cache** (embed question; if a near-identical question was answered for the *same document set*, return it) | Whole LLM call | Medium (invalidation care) |
